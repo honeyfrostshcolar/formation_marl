@@ -1,0 +1,383 @@
+
+=== Page 1 ===
+IEEE TRANSACTIONS ON ROBOTICS AND AUTOMATION, VOL. 17, NO. 6, DECEMBER 2001 905
+Modeling and Control of Formations of Nonholonomic
+Mobile Robots
+Jaydev P. Desai, James P. Ostrowski, and Vijay Kumar
+Abstract— This paper addresses the control of a team of nonholonomic
+mobile robots navigating in a terrain with obstacles while maintaining a
+desired formation and changing formations when required, using graph
+theory.Wemodeltheteamasatriple, /40 /41,consistingofagroupele-
+mentthatdescribesthegrosspositionoftheleadrobot,asetofshapevari-
+ablesthatdescribetherelativepositionsofrobots,andacontrolgraph
+thatdescribesthebehaviorsoftherobotsintheformation.Ourframeworkenablestherepresentationandenumerationofpossiblecontrolgraphsand
+the coordination of transitions between any two formations.
+Index Terms— Formation control of mobile robots, graph theory, non-
+linear control.
+I. INTRODUCTION
+Inthispaper,wediscussthefundamentalissuesunderlyingthecon-
+trolandcoordinationofmultipleautonomousrobots.Weformulatethe
+problem of modeling a formation of nonholonomic mobile robots and
+develop a framework for transitioning from one formation to another.
+We focus on tasks in which the robots are required to follow a trajec-tory while maintaining a desired formation and avoiding obstacles. In
+asituationsuchastheoneshowninFig.1,forexample,itmaybenec-
+essary to change the formation in order to negotiate the obstacle, andthen reform the original formation.
+Whilethereare manyapproaches tosolvingsuchaproblem[1],we
+are interested in a method that scales with the number of robots andobstacles in the environment. For this reason, we pursue in the cur-
+rent work easily computable, decentralized feedback laws that can be
+usedin conjunction with ahigherlevel (butlower complexity)motionplanner.
+Wemodelateamofrobotsinformationasatriple
+/40 /103/59 /114 /59 /72 /41,where
+/103 /50 /83/69 /40 /78 /41represents the grossposition and orientation of the lead
+robotin /78dimensions( /78equalstwoorthree), /114isasetof shapevari-
+ables that describe the relative positions of the robots in the team, and
+/72isacontrolgraph whichdescribesthecontrolstrategy(orbehavior)
+used by each robot and the dependence of its trajectory on that of one
+ormoreofitsneighbors.Whenviewedinthisframework,theproblemof locomotion can be broken down into three subproblems: 1) trajec-
+tory planning
+/40 /103 /41;2) robot control; and3) formation control /40 /114/59 /72 /41.
+Mostpreviousworkinmotionplanninghasfocusedonobtainingthe
+pathand,insomecases,designingfeedbackarchitectureandmodel-in-
+dependent coordination strategy. For example, see [2]–[4]. When the
+actuatorinputsforeachrobotareconcurrentlyplanned[5],thecompu-tational complexity of the planning task increases exponentially with
+ManuscriptreceivedMarch17,2001.Thispaperwasrecommendedforpub-
+lication by Associate Editor S. Agrawal and Editor A. De Luca upon evalua-
+tion of the reviewers’ comments. This work was supported by the U.S. ArmyResearch Office under Grant DAAH04-96-1-0007, the Defense Advanced Re-
+search Projects Agency under Grant N00014-92-J-1647, and the National Sci-
+enceFoundationunderGrantsBES92-16691,BES92-21796,IRI-9711834,and
+CMS91-57156.
+J. P. Desai is with the Program for Robotics, Intelligent Sensing, and
+Mechatronics (PRISM) Laboratory, Mechanical Engineering and Mechanics
+Department, Drexel University, Philadelphia, PA 19104 USA (e-mail:
+desai@coe.drexel.edu).
+J.P.OstrowskiandV.KumararewiththeGRASPLaboratory, Universityof
+Pennsylvania,Philadelphia,PA19104USA(e-mail:jpo@grasp.cis.upenn.edu;
+kumar@grasp.cis.upenn.edu).
+Publisher Item Identifier S 1042-296X(01)10911-0.
+Fig. 1. Formation of robots changing shapes.
+Fig. 2. Notation for /108 /0 /32and /108 /0 /108control.
+thenumberofrobotsandobstaclesandquicklybecomesintractable.In
+contrast, we address the problem of coordinating a number of robots,
+eachwiththeirownsensorsandfeedbackcontrollers.Onepossibleap-
+proach to designing independent controllers is to use simple control
+lawsbasedonthepotentialfieldtheory[6].InArkin’sbehavior-based
+control paradigm [7], this approach is used to coordinate formationsof robots. It is possible to synthesize an impressive array of group be-
+haviors[7]andcoordinaterobotsforsuchtasks.However,theinterac-
+tionbetweenthecontrollersandplannersforindependentlycontrolledrobotsiscomplexandtheperformanceanalysisofsuchsystemsisvery
+difficult.
+Anotherrelatedconceptforaformationofmultiplemobilerobotsis
+theconceptofstringstability,whichhasbeenaddressedbyseveralre-
+searchersinthecontextofautomatedhighwaysystems(AHS)[8],[9].
+We realize the importance of dynamic analysis, such as is done in un-derstanding string stability. However, our focus is on kinematic issues
+for nonholonomic mobile robots. Though string stability is important,
+theprimarygoalofthispaperistodevelopanewframeworkformod-elinga formation of mobile robots using graph theory andrelating the
+changes in formation to changes in the graph structure.
+II. C
+ONTROLLAWS FOR SHAPEVARIABLES
+Wefirstdevelopasetofdecentralized controllawsthatallowseach
+robot to maintain a desired position within a formation and to enable
+changesintheshapeofateam.Wedeveloptwotypesoffeedbackcon-
+trollers for maintaining a formation of a team of mobile robots. These
+controllawsareusefulformaintainingeither:1)thedesiredseparationand relative angle between the leader and the follower robot or 2) the
+desiredseparationofthefollowerrobotfromitstwoleaders.Thesetwo
+types of controllers are shown in Fig. 2.
+In the case of
+/108 /0 /32control, the state of the follower robot can be
+written in coordinates relative to the lead robot as /40 /108 /49 /50 /59/32 /49/50 /59/18 /50 /41/84.
+Similarly, in the case of /108 /0 /108control, the state of the follower robot
+can be written in terms of the two leader robots as: /40 /108 /49/51 /59/108 /50/51 /59/18 /51 /41/84.I n
+the /108 /0 /32control mode for two mobile robots, the aim is to maintain
+1042–296X/01$10.00 © 2001 IEEE
+Authorized licensed use limited to: NANKAI UNIVERSITY. Downloaded on November 06,2025 at 02:40:02 UTC from IEEE Xplore.  Restrictions apply. 
+
+=== Page 2 ===
+906 IEEE TRANSACTIONS ON ROBOTICS AND AUTOMATION, VOL. 17, NO. 6, DECEMBER 2001
+a desired length /108/100
+/49 /50and a desired relative angle /32/100
+/49/50between the two
+robots. The kinematic equations for the follower robot having /108 /0 /32
+control is given by
+/95/108 /49/50 /61 /118 /50 /99/111 /115 /13 /49 /0 /118 /49 /99/111/115 /32 /49/50 /43 /100/33 /50 /115/105/110 /13 /49
+/95 /32 /49/50 /61/49
+/108 /49/50/40 /118 /49 /115/105/110 /32 /49/50 /0 /13/118 /50 /115/105/110 /13 /49 /43 /100/33 /50 /99/111/115 /13 /49 /0 /108 /49/50 /33 /49 /41
+/95/18 /50 /61 /33 /50
+where /13 /49 /61 /18 /49 /43 /32 /49/50 /0 /18 /50and /118 /105 /59/33 /105 /40 /105 /61/49 /59 /50/41are the linear and
+angular velocities at the center of the axle of each robot.
+In /108 /0 /108control, this requires regulating the desired lengths, /108/100
+/49/51and
+/108/100
+/50/51,ofthethirdrobotfromitstwoleaders.Thekinematicequationsfor
+the follower robot is expressed as
+/95/108 /49/51 /61 /118 /51 /99/111/115 /13 /49 /0 /118 /49 /99/111/115 /32 /49/51 /43 /100/33 /51 /115/105/110 /13 /49
+/95/108 /50/51 /61 /118 /51 /99/111/115 /13 /50 /0 /118 /50 /99/111/115 /32 /50/51 /43 /100/33 /51 /115/105/110 /13 /50
+/95/18 /51 /61 /33 /51
+for the third robot, where /13 /105 /61 /18 /105 /43 /32 /105 /51 /0 /18 /51 /40 /105 /61/49 /59 /50/41. Using
+input/output linearization, we can guarantee exponential convergencefor the controlled variables and derive the control lawfor the inputs
+/33
+and /118for the follower robot in /108 /0 /32and /108 /0 /108control [10].
+III. ENUMERATION AND TRANSITIONS IN FORMATIONS
+Inourformulation,ateamof /110robotshasonedesignated leadrobot
+labeled /82 /49thatdirectlyorindirectlycontrolsallother(follower)robots
+in the formation. Within the formation, the follower robots depend on
+other robots for their motion. Thus there are many leadersthat “lead”
+otherfollowerrobots,butthereisauniqueleadrobot, /82 /49.Forexample,
+in Fig. 3, /82 /49is the lead robot and /82 /50, /82 /51, /82 /52, and /82 /53are all leaders
+each with one or more followers.
+In our work, we define control graphs to be labeled digraphs with
+each vertex having a uniquely assigned integer number and subject to
+the following three constraints.
+Constraint A: Every vertex (robot) except one has at least one in-
+comingedge.Thereisonevertex(robot)withnoincomingedges,and
+at least one outgoing edge, which is labeled /82 /49. This is the lead robot
+in the formation.
+ConstraintB: Everydirectededgeinthedigraphgoesfromalower
+vertex label to a higher vertex label.
+Constraint C: The number of incoming edges for any vertex /82 /105
+/40 /105/62 /49/41is less than or equal to an integer /112 /20 /100/105/109 /40 /83/69 /40 /78 /41/41, that
+describes the number of output variables for a given robot. /112 /61/50for
+Hilaretyperobotsandwewillworkwiththis /112fortherestofthispaper.
+A convenient method for representing control graphs is through an
+/110 /2 /110adjacencymatrix[11].Itcanbeshownthatifthereare /110vertices
+inacontrolgraph,thereareexactly /77 /40 /110 /41/61 /110 /33/40 /110 /0 /49/41/33 /61 /50/110 /0 /49distinct
+control graphs (based on the constraints stated above) [11], [12].
+Itispossibletoclassifycontrolgraphsbasedonthenumberof /108 /0 /32
+and /108 /0 /108controllers. We first introduce some notation. Since we will
+need to count the number of possible graphs, we will need to investi-gate permutations of the robot’s indices. Given
+/110 /32robots with /108 /0 /32
+controllers, let /102 /11 /103representthe setofall possibleorderingsof /110 /32of
+theintegers(robotindices) /102 /49 /59 /46/46/46 /59/110 /103.Thus,thereare /13possiblesets,
+/11/49/59/11/50/59 /46/46/46 /59/11/13, where /11/105and /13are given by
+/11/105/61 /102 /78/105
+/49 /59/78/105
+/50 /59 /46/46/46 /59/78/105
+/110 /103 /61 /102 /50 /59/78/105
+/50 /59 /46/46/46 /59/78/105
+/110 /103
+/13 /61/110 /0 /50
+/110 /32 /0 /49/61/40 /110 /0 /50/41/33
+/40 /110 /32 /0 /49/41/33/40 /110 /0 /110 /32 /0 /49/41/33
+Fig. 3. Examples of formations.
+and /78/105
+/106 /50/102 /49 /59 /1/1/1 /59/110 /103denotes the index of the robot in the formation
+with /108 /0 /32control, i.e., /82/78. The 2 appears in each /11/105because /82 /50
+always has /108 /0 /32control.
+The set /102 /11 /103uniquely determines a corresponding set, /102 /12 /103, defined
+as the collections of the /13sets with the remaining robot indices. We
+denote these by /12/49/59/12/50/59 /46/46/46 /59/12/13where
+/12/105/61 /102 /76/105
+/49 /59/76/105
+/50 /59 /46/46/46 /59/76/105
+/110 /103
+and /76/105
+/106denotestheindexoftherobotintheformationwith /108 /0 /108control,
+i.e., /82/76.
+Theorem 1: Given /110robots in the formation with /110 /32 /21 /49robots
+having /108 /0 /32control and the remaining /110 /108 /61/40 /110 /0 /110 /32 /0 /49/41robots
+having /108 /0 /108control, with /110 /108 /62 /48, there are exactly /0/40 /110 /32 /41control
+graphs where /0/40 /110 /32 /41is given by
+/0/40 /110 /32 /41/61/49
+/50/110
+/40 /110 /0 /49/41/33/13
+/105 /61/49/110
+/106 /61/49/40 /76/105
+/106 /0 /50/41 /58 (1)
+Proof:a)Giventhat /82 /49istheleadrobotinanyformation,and /82 /50
+by constraint B always has /108 /0 /32control, the sets /102 /11 /103and /102 /12 /103give
+all possible combinations of formations with /110 /32robots having /108 /0 /32
+and /110 /108robotshaving /108 /0 /108controllers.Letusconsideronesuchpossible
+combination, /11/105forrobotswith /108 /0 /32controland /12/105thecorresponding
+setforrobotswith /108 /0 /108control.BasedonconstraintB,eachnumber /76/105
+/106
+has/76 /0 /49
+/50possiblechoicesfortheindexoftheleaderrobots.Thus,the
+totalnumberof /108 /0 /108formationspossibleforthese /110 /108robotsisgivenby
+/10/105/61/110
+/106 /61/49/76/105
+/106 /0 /49
+/50/61/110
+/106 /61/49/40 /76/105
+/106 /0 /49/41/40 /76/105
+/106 /0 /50/41
+/50/58
+Similarlyforeachindex /78/105
+/106,intheset /11/105denoting /108 /0 /32controlforthe
+robot,thereare /40 /78/105
+/106 /0 /49/41choicesofaleader.Thus,thetotalnumberof
+/108 /0 /32formations possible for these /110 /32robots is
+/9/105/61/110
+/106 /61/49/40 /78/105
+/106 /0 /49/41 /58
+Finally, combining the above two results, we obtain the total number
+/2/105offormations possiblefor agivenset /11/105andthecorrespondingset
+/12/105
+/2/105/61/9/105/1 /10/105/58
+Since this computation is true for all the sets /11/49/59/11/50/59 /46/46/46 /59/11/13/50/102 /11 /103
+(andthecorrespondingsets /12/49/59/12/50/59 /46/46/46 /59/12/13/50/102 /12 /103),thetotalnumber
+ofcontrolgraphsfor /110robotswith /110 /32robotshaving /108 /0 /32controland
+all other robots having /108 /0 /108control is given by
+/0/40 /110 /32 /41/61/13
+/105 /61/49/9/105/1 /10/105/61/49
+/50/110
+/108/40 /110 /0 /49/41/33/13
+/105 /61/49/110
+/106 /61/49/40 /76/105
+/106 /0 /50/41 /58
+Authorized licensed use limited to: NANKAI UNIVERSITY. Downloaded on November 06,2025 at 02:40:02 UTC from IEEE Xplore.  Restrictions apply. 
+
+=== Page 3 ===
+IEEE TRANSACTIONS ON ROBOTICS AND AUTOMATION, VOL. 17, NO. 6, DECEMBER 2001 907
+Fig. 4. Enumeration of transitions in control laws for robot /82.
+Given the total number of robots in the formation and /110 /32, we can
+easily compute all possible sets /11/105and the corresponding set /12/105.F o r
+/110 /61/51,thereareonlytwocontrolgraphwithtwo /108 /0 /32controllersand
+onecontrolgraphforone /108 /0 /32(i.e., /82 /50)and /82 /51having /108 /0 /108control.
+So there are totally three control graphs.
+WhileTheorem1allowstheclassificationofcontrolgraphs,itdoesnot
+giveusanyinformationabouttheequivalenceclassesofcontrolgraphs.
+Ontheotherhand,sincecontrolgraphsarederivedfromdigraphs,itis
+productivetoenumeratethepossibledigraphsforan /110robotformation
+and establish equivalence classes of digraphs. An upper bound on the
+digraphsfor /110robotsisgivenbythepolynomial[11],[12]
+/81 /110 /40 /120 /41/61/40/50 /110 /0 /51/41
+/107 /61/40 /110 /0 /49/41/97 /107 /120/107/58 (2)
+Basedon(2),thereare /40 /110 /0 /49/41equivalenceclassesofdigraphs,where
+the /107th equivalence class has /97 /107members, with /97 /107given by Polya’s
+theorem [13]. A more detailed description of the mathematical tools
+for enumeration of control graphs can be found in [11] and [12].
+In summary, the procedure for enumerating control graphs involves
+the following two steps.
+1) Use Polya’sTheorem to enumerate all digraphs of order /110, i.e.,
+/100 /110 /40 /120 /41/61 /49 /43 /97 /49 /120 /43 /97 /50 /120/50/43 /1/1/1 /43 /97 /110 /40 /110 /0 /49/41 /120/110 /40 /110 /0 /49/41/58
+Equation(2)providesatighterboundonallowabledigraphs,i.e.,
+/81 /110 /40 /120 /41:
+/81 /110 /40 /120 /41/61 /97 /40 /110 /0 /49/41 /120/40 /110 /0 /49/41/43 /97 /110 /120/110/43 /1/1/1 /43 /97 /40/50 /110 /0 /51/41 /120/40/50 /110 /0 /51/41/58
+2) Choose any control graph /71, enumerated by /81 /110 /40 /120 /41, and label
+the vertices arbitrarily. Based on this labeling, construct its ad-
+jacency matrix. By trial and error, obtain the control graphs for
+which the adjacency matrix is upper triangular.
+Astheexponentof /120intheexpressionfor /81 /110 /40 /120 /41variesfrom /40 /110 /0 /49/41
+to /40/50 /110 /0 /51/41, there is a spectrum of control graphs ranging from pure
+/108 /0 /32controltopure /108 /0 /108controlwithamedleyofcombined /108 /0 /32and
+/108 /0 /108control falling in between the two exponents (except for /110 /61/51
+which only has pure /108 /0 /32and pure /108 /0 /108control).
+The transition from one control graph to another is modeled by a
+transition matrix . We define the transition matrix, /84, as the difference
+betweenthefinal(F)andtheinitial(I)adjacencymatrices.Theappear-
+ance of ( /01) in the transition matrix denotes that the edge connecting
+theverticesrepresentingtherobotsintheformationneedstobebrokento achieve the transition. Similarly, the appearance of a (
+/431) denotes
+theadditionofanedge(i.e.,communicationsetupbetweentherobots).
+Fig. 5. Initial and final control graph for Example 1.
+Fig. 6. Formation change forthree robots in thepresence of sensory noise.
+Fig.4isanexhaustivelistofallpossibletransitionsinthecontrolgraphfor the
+/106th robot, /82 /106( /106 /54/61/49).
+IV. SIMULATION RESULTS
+In this section, we will demonstrate the use of the proposed control
+lawsinthepresenceofobstaclesandshowhowwecantransitionfrom
+oneformationtoanotherbasedonthetransitionsenumeratedinFig.4.
+Example 1: In this example, we examine the effect of making
+changes in the control graph. We take the example of three robots
+moving originally in a triangular formation and transitioning to a
+straightlineformation(seeFig.5).Fig.6showsthepathoftherobots,
+/82 /50and /82 /51, in the presence of sensory noise, where the noise is
+modeled as a uniformly distributed random noise. It is seen that, even
+in the presence of noise, the formation converges to the desired shapewhile maintaining the constraints.
+Example 2: In this example, the task is to transition from a trian-
+gular formation to a rectangular formation. Fig. 7 illustrates the initial
+and final control graphs. The change in controller for each robot is il-
+lustratedthroughthevarioustransitionlawsinFig.4.Fig.8illustratesthe path of the various robots during the transition from the triangular
+formation to a rectangular formation while avoiding the obstacles.
+Authorized licensed use limited to: NANKAI UNIVERSITY. Downloaded on November 06,2025 at 02:40:02 UTC from IEEE Xplore.  Restrictions apply. 
+
+=== Page 4 ===
+908 IEEE TRANSACTIONS ON ROBOTICS AND AUTOMATION, VOL. 17, NO. 6, DECEMBER 2001
+Fig. 7. Initial and final control graph for Example 2.
+Fig. 8. Formation change for sixrobots in the presence of sensory noise.
+V. CONCLUSION
+Inthispaper,wehavestudiedstrategiesforcontrollingformationsof
+mobile robots using methods from nonlinear control theory and graph
+theory.Wehavefocusedondecomposingtheproblemofcontrollingaformation of nonholonomic mobile robots into: 1) controllinga single
+leadrobotand2)controllingotherfollowerrobotsintheteam.Weused
+the terms
+/108 /0 /32and /108 /0 /108control to reflect whether the control laws
+are based on tracking the position and orientation of the robot relative
+toaleader,orthepositionrelativetotwoleaders,respectively.Wealso
+defined the concept of a transition matrix, which governs the additionand deletion of edges in the control graph andhence the change in the
+communication protocol. Based on this, we presented an exhaustive
+list of all possible transitions that can occur within the robots in theformation and the corresponding transition matrix column.
+Thereareseveralimportantissuesthatneedtobeaddressedinfuture
+research in this area, including: 1) how to choose a control graph andthe desired shape based on the constraints in the environment; 2) how
+to plan changes in
+/40 /103/59 /114 /59 /72 /41depending on sensor constraints; 3) how
+toallowformationstobesplitintosub-formations,leadingtomultipleleadrobots;and4d)thoughthetransitionmatrixgives usthe informa-
+tionneededtochangeformations,itisnotclearifthereisanoptimalway
+forcarryingoutthesechanges,ratherthanthesequentialalgorithmpre-
+sentedhere.Someofthesetopicsarethefocusofourpresentresearch.
+R
+EFERENCES
+[1] J.C. Latombe, Robot Motion Planning . Boston, MA:Kluwer, 1991.
+[2] R.W.Beard,J.Lawton,andF.Y.Hadaegh,“Afeedbackarchitecturefor
+formation control,” in Proc. American Control Conf. , vol. 6, 2000, pp.
+4087–4091.
+[3] J.-P. Laumond, P. E. Jacobs, M. Taix, and R. M. Murray, “A motion
+plannerfornonholonomicmobilerobots,” IEEETrans.Robot.Automat. ,
+vol. 10, pp. 577–593, Oct. 1994.
+[4] M. Egerstedt and H. Xiaoming, “Formation constrained multi-agent
+control,” in IEEE Int. Conf. Robotics and Automation , vol. 4, 2001, pp.
+3961–3966.
+[5] J.P.DesaiandV.Kumar,“Nonholonomicmotionplanningformultiple
+mobile manipulators,” in Proc. 1997 IEEE Int. Conf. on Robotics and
+Automation , vol. 4, Albuquerque, NM, Apr. 1997,pp. 3409–3414.[6] O. Khatib, “Real-time obstacle avoidance for manipulators and mobile
+robots,”Int. J. Robot. Res. , vol. 5, no. 1, pp. 90–99, 1986.
+[7] T.BalchandR. C.Arkin,“Behavior-basedformationcontrolformulti-
+robot teams,” IEEE Trans. Robot. Automat. , vol. 14, pp. 926–939, Dec.
+1999.
+[8] D. Swaroop and J. K. Hedrick, “String stability of interconnected sys-
+tems,”IEEE Trans.Automat. Contr. , vol. 41,pp. 349–357,Mar. 1996.
+[9] D.YanakievandI.Kanellakopoulos,“Asimplifiedframeworkforstring
+stabilityinAHS,”in Preprintsofthe13thIFACWorldCongress ,vol.Q,
+1996, pp. 177–182.
+[10] J. P. Desai, J. P. Ostrowski, and V. Kumar, “Controlling formations of
+multiple mobile robots,” in Proc. 1998 IEEE Int. Conf. Robotics and
+Automation , vol. 4, Leuven, Belgium, May 1998, pp. 2864–2869.
+[11] J. P. Desai, “Motion planning and control of cooperative robotic
+systems,” Ph.D. dissertation, Univ. of Pennsylvania, Philadelphia, Oct.1998.
+[12] J. P. Desai, V. Kumar, and J. P. Ostrowski, “Control of changes in
+formation for a team of mobile robots,” in Proc. 1999 IEEE Int. Conf.
+on Robotics and Automation , vol. 2, Detroit, MA, May 1999, pp.
+1556–1561.
+[13] N.Deo, GraphTheoryWithApplicationstoEngineeringandComputer
+Science. Englewood Cliffs, NJ: Prentice-Hall, 1974.
+Multisensor Fusion for Simultaneous Localization and
+Map Building
+J. A. Castellanos, J. Neira, and J. D. Tardós
+Abstract— This paper describes how multisensor fusion increases both
+reliability and precision of the environmental observations used for the si-
+multaneouslocalizationandmap-buildingproblemformobilerobots.Mul-tisensorfusionisperformedattheleveloflandmarks,whichrepresentsets
+of related and possibly correlated sensor observations. The work empha-
+sizestheideaofpartialredundancyduetothedifferentnatureoftheinfor-
+mationprovidedbydifferentsensors.Experimentationwithamobilerobot
+equipped with a multisensor system composed of a 2-D laser rangefinder
+and a charge coupled device camera is reported.
+Index Terms— Correlation, landmark, mobile robot, multisensor fusion,
+simultaneous localization and map building.
+I. INTRODUCTION
+Reliable and accurate sensing of the environment of a mobile robot
+is an important task both in localizing the robot and in building a de-
+tailed map of such an environment. One of the fundamental ideas to
+achievethisreliabilityistheuseofredundancy,thatis,tocombineen-vironmental information obtained by several sensors [1]–[3]. Dealing
+withredundancyrequiresboththeavailabilityofasystematicdescrip-
+tion of uncertain geometric information and a consistent multisensorfusion mechanism [4].
+Different approaches to the simultaneous localization and
+map-building (SLAM) problem for mobile robots have been reportedintheliteratureaftertheseminalpaperofSmith etal.[5]andtheearly
+Manuscript received October 12, 2000; revised June 6, 2001. This paper
+was recommended for publication by Associate Editor N. Xi and Editor
+S. Hutchinson upon evaluation of the reviewers’ comments. This work
+was supported by the Spanish Dirección General de Investigación Projects
+DPI2000-1265 and DPI2000-1272.
+The authors are with the Departamento de Informática e Ingeniería de
+Sistemas, Universidad de Zaragoza, E-50015 Zaragoza, Spain (e-mail:
+jacaste@posta.unizar.es;jneira@posta.unizar.es; tardos@posta.unizar.es).
+Publisher Item Identifier S 1042-296X(01)10904-3.
+1042–296X/01$10.00 © 2001 IEEE
+Authorized licensed use limited to: NANKAI UNIVERSITY. Downloaded on November 06,2025 at 02:40:02 UTC from IEEE Xplore.  Restrictions apply. 

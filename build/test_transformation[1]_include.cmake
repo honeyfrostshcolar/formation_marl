@@ -1,0 +1,5 @@
+if(EXISTS "/home/lpp/formation_test/build/test_transformation[1]_tests.cmake")
+  include("/home/lpp/formation_test/build/test_transformation[1]_tests.cmake")
+else()
+  add_test(test_transformation_NOT_BUILT test_transformation_NOT_BUILT)
+endif()

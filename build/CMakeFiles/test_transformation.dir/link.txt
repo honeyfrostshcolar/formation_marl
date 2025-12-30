@@ -1,0 +1,1 @@
+/usr/bin/c++  -g   CMakeFiles/test_transformation.dir/test/test_transformation.cpp.o  -o bin/tests/test_transformation  libformation_core.a /usr/lib/x86_64-linux-gnu/libgtest.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgtest.a -lpthread 
