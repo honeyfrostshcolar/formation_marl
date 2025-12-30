@@ -83,8 +83,6 @@ class ConstrainedFormationNet(nn.Module):
             # 应用约束转换为直角坐标
             positions = self._polar_to_constrained_cartesian(polar_params) # [batch_size, num_followers, 2]
             base_positions.append(positions) # [num_graphs, batch_size, num_followers, 2]
-        
-        //2025/12/24
 
         # 根据训练阶段决定是否使用微调
         if training_phase == "rl_finetune":
