@@ -43,6 +43,16 @@ class FormationTrainer:
         progress_bar = tqdm(dataloader, desc=f"Training ({training_phase})") # 进度条（显示训练进度）
         
         for batch_idx, batch in enumerate(progress_bar):
+
+            # sample_dict = {
+            #     'features': features,
+            #     'leader_pose': leader_pose,
+            #     'environment_type': environment_type,
+            #     'has_expert': has_expert,
+            #     'controlGraph': ctrlGraph,
+            #     'expert_positions': expert_positions
+            # }
+
             # 准备数据
             features = batch['features'].to(self.device)
             leader_pose = batch['leader_pose']
@@ -50,9 +60,12 @@ class FormationTrainer:
             
             has_expert = batch.get('has_expert', None)
             expert_positions = batch.get('expert_positions', None)
-            expert_graph_idx = batch.get('controlGraph', None)
+            expert_graph = batch.get('controlGraph', None)
             
             # 前向传播（前向传播仅负责 “基于当前权重做预测”）
+            # 网络调整阶段
+            # 预测的位置： [batch_size, num_graphs, num_robots, 2] 包括了所有控制图对跟随者的预测位置
+            # 预测的编队分数： [batch_size, num_graphs] 包括了每个控制图的评分
             pred_positions, pred_scores = self.model(features, training_phase) #初始化的时候ConstrainedFormationNet就是model
             
             # 计算优势函数（强化学习），这个优势函数计算的是位置的优势啊，不是控制图的优势
@@ -124,7 +137,7 @@ class FormationTrainer:
                 # 转换为绝对坐标
                 absolute_positions = self._relative_to_absolute(positions, leader_pose)
                 
-                # 使用C++评估函数计算得分
+                # 使用C++评估函数计算得分：evaluateFormation(const Environment& env, const FormationConfig& formation) 
                 score = self.cpp_evaluator.evaluate_formation(
                     env_type, absolute_positions, leader_pose
                 )

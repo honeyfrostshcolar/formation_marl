@@ -241,7 +241,7 @@ double FormationEvaluator::evaluateCommunicationQuality(
 
 // 主评估函数
 double FormationEvaluator::evaluateFormation(const Environment& env, const FormationConfig& formation) {
-    // 将相对位置转换为绝对坐标
+    // 将跟随者相对位置转换为绝对坐标
     std::vector<Point2D> absolutePositions = 
         convertToAbsolutePositions(formation.positions, env.leaderState);
     

@@ -74,8 +74,6 @@ class ConstrainedFormationNet(nn.Module):
         # 特征编码
         encoded = self.encoder(x) # [batch_size, 32]
 
-        测试
-        
         # 基础位置生成
         base_positions = []
         for i, generator in enumerate(self.position_generators):
