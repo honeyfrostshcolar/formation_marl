@@ -4,6 +4,8 @@ import pandas as pd
 import argparse
 import os
 import sys
+import cv2
+import numpy as np
 
 # 添加模块路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -37,6 +39,7 @@ def main():
     
     # 手动赋值所有参数
     args.data_dir = "/home/lpp/formation_test/data"  # 替换为你的训练数据实际路径
+    args.map = "/home/lpp/formation_test/data/env_map.pgm"  # 替换为你的PGM文件实际路径
     df = pd.read_csv(args.data_dir, encoding="utf-8")
     args.output_dir = "/data"                      # 输出目录（可改）
     args.feature_dim = 26                          # 特征维度
@@ -55,7 +58,25 @@ def main():
     
     # 初始化C++模块（需要先编译）
     try:
+
         import formation_core
+
+        try:
+            # 读取PGM图像（OpenCV自动识别PGM格式）
+            pgm_path = args.map  # 替换为你的PGM文件实际路径
+            obstacle_threshold = 128  # 灰度阈值，低于该值视为障碍物
+            img = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
+        
+            if img is None:
+                print(f"错误：无法读取PGM文件 {pgm_path}（可能路径错误或格式不支持）")
+            
+            # 灰度值转栅格值
+            grid_map = np.where(img < obstacle_threshold, 1, 0).tolist()
+    
+        except Exception as e:
+            print(f"读取PGM失败：{str(e)}")
+            return []
+        
         cpp_evaluator = formation_core.FormationEvaluator(0.4, 0.3, 0.3)
         print("Successfully loaded C++ core module")
     except ImportError:
@@ -128,7 +149,7 @@ def main():
             # 训练一个epoch
             train_loss, loss_components = trainer.train_epoch(
                 train_loader, loss_fn, training_phase, 
-                imitation_weight, stage_idx
+                imitation_weight, stage_idx, grid_map
             )
             
             # 验证

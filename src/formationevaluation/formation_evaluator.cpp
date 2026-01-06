@@ -10,10 +10,10 @@ Environment::Environment(const std::vector<std::vector<int>>& grid,
                          double commDist)
     : gridMap(grid), leaderState(state), safetyThreshold(safety), maxCommDistance(commDist) {
 
-        // 模拟激光雷达扫描
-        simulateLidar();
-        // 计算通道宽度
-        calculateCorridorWidth();
+    // 模拟激光雷达扫描
+    simulateLidar();
+    // 计算通道宽度
+    calculateCorridorWidth();
 
 }
 

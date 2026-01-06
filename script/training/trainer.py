@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
+import formation_core 
 
 class FormationTrainer:
     """
@@ -21,7 +22,7 @@ class FormationTrainer:
         self.val_scores = []
         
     def train_epoch(self, dataloader, loss_fn, training_phase="mixed", 
-                   imitation_weight=0.7, curriculum_stage=0):
+                   imitation_weight=0.7, curriculum_stage=0, grid_map=None):
         """
         训练一个epoch
         
@@ -35,6 +36,8 @@ class FormationTrainer:
         self.model.train() # 把模型设置为训练模式（启用 dropout 和 batch normalization）
         total_loss = 0
         loss_components = {'imitation_loss': 0, 'rl_loss': 0, 'diversity_loss': 0}
+        safetyThreshold = 0.5
+        maxCommDistance = 5.0
         
         # 更新损失函数权重
         loss_fn.imitation_weight = imitation_weight
@@ -64,30 +67,31 @@ class FormationTrainer:
             
             # 前向传播（前向传播仅负责 “基于当前权重做预测”）
             # 网络调整阶段
-            # 预测的位置： [batch_size, num_graphs, num_robots, 2] 包括了所有控制图对跟随者的预测位置
+            # 预测的位置： [batch_size, num_graphs, num_robots, 2] 包括了所有控制图对跟随者的预测位置（领航者位置是相对位置[0,0]）
             # 预测的编队分数： [batch_size, num_graphs] 包括了每个控制图的评分
             pred_positions, pred_scores = self.model(features, training_phase) #初始化的时候ConstrainedFormationNet就是model
             
             # 计算优势函数（强化学习），这个优势函数计算的是位置的优势啊，不是控制图的优势
-            advantages = self._compute_advantages(pred_positions, leader_pose, 
-                                                environment_type, curriculum_stage)
+            advantages = self._compute_advantages(pred_positions, leader_pose, expert_graph,
+                                                environment_type, curriculum_stage, grid_map, 
+                                                safetyThreshold, maxCommDistance)
             
             # 准备专家数据
             if expert_positions is not None:
                 expert_positions = expert_positions.to(self.device)
-                expert_graph_idx = expert_graph_idx.to(self.device) #这个现在我已经删了
+                # expert_graph_idx = expert_graph_idx.to(self.device) #这个现在我已经删了
                 has_expert_mask = has_expert.to(self.device)
             else:
                 # 如果没有专家数据，创建空的mask
                 has_expert_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
                 expert_positions = torch.zeros_like(pred_positions[:, 0])
-                expert_graph_idx = torch.zeros(features.size(0), dtype=torch.long, device=self.device)
+                # expert_graph_idx = torch.zeros(features.size(0), dtype=torch.long, device=self.device)
             
             # 计算损失(强化学习就在里面)
             # loss是加权损失，losses_dict是各个部分的损失
             loss, losses_dict = loss_fn(
                 pred_positions, pred_scores, expert_positions,
-                expert_graph_idx, advantages, has_expert_mask
+                expert_graph, advantages, has_expert_mask
             )
             
             # 反向传播
@@ -118,7 +122,8 @@ class FormationTrainer:
         
         return avg_total_loss, loss_components
     
-    def _compute_advantages(self, pred_positions, leader_poses, environment_types, curriculum_stage):
+    def _compute_advantages(self, pred_positions, leader_poses, expert_graphs, environment_types, 
+                            curriculum_stage, grid_map, safetyThreshold=0.5, maxCommDistance=5.0):
         """
         计算优势函数 - 基于评估函数得分
         """
@@ -129,19 +134,30 @@ class FormationTrainer:
         for i in range(batch_size):
             leader_pose = leader_poses[i]
             env_type = environment_types[i]
+            expert_graph = expert_graphs[i]
             
             for j in range(num_graphs):
                 # 获取预测的位置配置
-                positions = pred_positions[i, j].detach().cpu().numpy()
+                positions = pred_positions[i, j].detach().cpu().numpy() # 提取第i个样本、第j个编队的预测位置（相对位置）
                 
                 # 转换为绝对坐标
                 absolute_positions = self._relative_to_absolute(positions, leader_pose)
-                
+
+                # 
+                formation_config = formation_core.FormationConfig()
+                formation_config.control_graph = expert_graph[j].tolist()
+                formation_config.positions = positions.tolist()
+
+                leader_pose_cpp = formation_core.RobotState()
+                leader_pose_cpp.position.x = leader_pose[j].position.x
+                leader_pose_cpp.position.y = leader_pose[j].position.y
+                leader_pose_cpp.orientation = leader_pose[j].orientation
+
+                # 转换为C++环境
+                env = formation_core.Environment(grid_map, leader_pose_cpp, safetyThreshold, maxCommDistance) # 最后两个参数是安全阈值（碰撞风险）和最大通信距离
+
                 # 使用C++评估函数计算得分：evaluateFormation(const Environment& env, const FormationConfig& formation) 
-                score = self.cpp_evaluator.evaluate_formation(
-                    env_type, absolute_positions, leader_pose
-                )
-                
+                score = self.cpp_evaluator.evaluate_formation(env, formation_config)
                 advantages[i, j] = score
         
         # 归一化优势函数

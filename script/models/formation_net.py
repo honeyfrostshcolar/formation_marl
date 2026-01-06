@@ -181,7 +181,7 @@ class HybridLoss(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss() # 交叉熵损失（预测编队分数与专家选择的差异）离散
     
     def forward(self, pred_positions, pred_scores, expert_positions, 
-                expert_graph_idx, advantages, has_expert_mask):
+                expert_graph, advantages, has_expert_mask):
         """
         计算混合损失
         
