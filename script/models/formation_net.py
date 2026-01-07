@@ -171,11 +171,12 @@ class HybridLoss(nn.Module):
     混合损失函数：结合模仿学习和强化学习
     """
     
-    def __init__(self, imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1):
+    def __init__(self, imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1, control_graphs=None):
         super(HybridLoss, self).__init__()
         self.imitation_weight = imitation_weight
         self.rl_weight = rl_weight
         self.diversity_weight = diversity_weight
+        self.control_graphs = control_graphs
         
         self.mse_loss = nn.MSELoss() # 均方误差损失（预测位置与专家位置的差异）连续
         self.ce_loss = nn.CrossEntropyLoss() # 交叉熵损失（预测编队分数与专家选择的差异）离散
@@ -189,11 +190,21 @@ class HybridLoss(nn.Module):
             pred_positions: 预测的位置 [batch_size, num_graphs, num_robots, 2]
             pred_scores: 预测的编队分数 [batch_size, num_graphs]
             expert_positions: 专家位置 [batch_size, num_robots, 2]
+            expert_graph: 专家选择的编队控制图 shape [batch_size, num_robots, num_robots]
+            control_graphs: 控制图列表 shape (num_graphs, num_robots, num_robots)
             expert_graph_idx: 专家选择的编队索引 [batch_size]
             advantages: 优势函数 [batch_size, num_graphs]
             has_expert_mask: 是否有专家标注 [batch_size]
         """
         batch_size = pred_positions.size(0)
+
+        # 获取专家选择的控制图索引
+        expert_graph_idx = torch.zeros(batch_size, dtype=torch.long, device=pred_positions.device)
+        for i in range(batch_size):
+            for j in range(self.control_graphs.shape[0]):
+                if torch.equal(expert_graph[i], self.control_graphs[j]):
+                    expert_graph_idx[i] = j
+                    break
         
         # 1. 模仿学习损失（仅对有专家标注的样本）
         imitation_loss = 0.0
@@ -210,7 +221,7 @@ class HybridLoss(nn.Module):
         # 2. 强化学习损失（对所有样本）但是这个pred_scores指的是控制图的分数，不是位置
         # 目前由于位置是连续的，所以强化学习损失只作用于控制图选择上，之后可以尝试一下用其他强化学习方法来优化位置（比如PPO）
         log_probs = F.log_softmax(pred_scores, dim=1) # 获取对数概率
-        rl_loss = -torch.mean(log_probs * advantages)
+        rl_loss = -torch.mean(log_probs * advantages) # advantages代表了奖励
         
         # 3. 多样性损失（鼓励不同控制图生成不同的位置）
         diversity_loss = self._compute_diversity_loss(pred_positions)

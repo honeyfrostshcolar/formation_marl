@@ -77,6 +77,17 @@ def main():
             print(f"读取PGM失败：{str(e)}")
             return []
         
+        cpp_enumerator = formation_core.FormationEnumerator(args.num_robots)
+        all_formations = cpp_enumerator.get_all_formations()
+        adj_np_list = []
+        for cg in all_formations:
+            # 获取单个控制图的邻接矩阵（numpy.ndarray，shape=(N,N)）
+            adj_np = cg.get_adjacency_matrix()
+            adj_np_list.append(adj_np)
+
+        batch_adj_np = np.stack(adj_np_list, axis=0)
+        control_graphs = torch.from_numpy(batch_adj_np).float() # shape=(num_graphs, N, N)
+
         cpp_evaluator = formation_core.FormationEvaluator(0.4, 0.3, 0.3)
         print("Successfully loaded C++ core module")
     except ImportError:
@@ -94,7 +105,7 @@ def main():
     )
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4) # Adam优化器（用于更新模型参数
-    loss_fn = HybridLoss(imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1)
+    loss_fn = HybridLoss(imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1, control_graphs=control_graphs) # 混合损失函数
     
     # 初始化训练器
     trainer = FormationTrainer(model, optimizer, device, cpp_evaluator)

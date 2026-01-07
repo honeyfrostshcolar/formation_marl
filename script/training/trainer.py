@@ -71,7 +71,7 @@ class FormationTrainer:
             # 预测的编队分数： [batch_size, num_graphs] 包括了每个控制图的评分
             pred_positions, pred_scores = self.model(features, training_phase) #初始化的时候ConstrainedFormationNet就是model
             
-            # 计算优势函数（强化学习），这个优势函数计算的是位置的优势啊，不是控制图的优势
+            # 计算优势函数（强化学习），这个优势函数计算的是Environment& env下 FormationConfig& formation的优势
             advantages = self._compute_advantages(pred_positions, leader_pose, expert_graph,
                                                 environment_type, curriculum_stage, grid_map, 
                                                 safetyThreshold, maxCommDistance)

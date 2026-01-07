@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/eigen.h>
 #include "LidarSimulator.h"
 #include "FeatureExtractor.h"
 #include "FormationEvaluator.h"
@@ -39,9 +40,8 @@ PYBIND11_MODULE(formation_core, m) {
         .def_readwrite("positions", &FormationConfig::positions); 
 
     py::class_<ControlGraph>(m, "ControlGraph") //绑定ControlGraph类
-        .def(py::init<double, double, double>())
-        .def_readwrite("position", &RobotState::position)
-        .def_readwrite("orientation", &RobotState::orientation);
+        .def(py::init<int>())
+        .def("get_adjacency_matrix", &ControlGraph::getAdjacencyMatrix);
     
     // 绑定激光雷达仿真器
     py::class_<LidarSimulator>(m, "LidarSimulator") //绑定LidarSimulator类
