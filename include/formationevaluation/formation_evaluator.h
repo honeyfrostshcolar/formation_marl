@@ -4,24 +4,25 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <simenv2gendate/types.h>
 
 // 二维点结构
-struct Point2D {
-    double x, y;
-    Point2D(double x = 0, double y = 0) : x(x), y(y) {}
-};
+// struct Point2D {
+//     double x, y;
+//     Point2D(double x = 0, double y = 0) : x(x), y(y) {}
+// };
 
-// 机器人状态
-struct RobotState {
-    Point2D position;  // 绝对坐标
-    double orientation; // 朝向（弧度）
-};
+// // 机器人状态
+// struct RobotState {
+//     Point2D position;  // 绝对坐标
+//     double orientation; // 朝向（弧度）
+// };
 
-// 编队配置
-struct FormationConfig {
-    std::vector<std::vector<int>> controlGraph; // 控制图邻接矩阵
-    std::vector<Point2D> positions;             // 相对位置配置
-};
+// // 编队配置
+// struct FormationConfig {
+//     std::vector<std::vector<int>> controlGraph; // 控制图邻接矩阵
+//     std::vector<Point2D> positions;             // 相对位置配置
+// };
 
 // 环境信息
 struct Environment {

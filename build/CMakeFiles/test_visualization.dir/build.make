@@ -79,7 +79,7 @@ test_visualization_EXTERNAL_OBJECTS =
 
 bin/tests/test_visualization: CMakeFiles/test_visualization.dir/test/test_visualization.cpp.o
 bin/tests/test_visualization: CMakeFiles/test_visualization.dir/build.make
-bin/tests/test_visualization: libformation_core.a
+bin/tests/test_visualization: libformation_core_cpp.a
 bin/tests/test_visualization: /usr/lib/x86_64-linux-gnu/libgtest.a
 bin/tests/test_visualization: /usr/lib/x86_64-linux-gnu/libgtest_main.a
 bin/tests/test_visualization: /usr/lib/x86_64-linux-gnu/libgtest.a

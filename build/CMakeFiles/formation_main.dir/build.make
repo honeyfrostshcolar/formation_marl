@@ -79,7 +79,7 @@ formation_main_EXTERNAL_OBJECTS =
 
 bin/formation_main: CMakeFiles/formation_main.dir/src/main.cpp.o
 bin/formation_main: CMakeFiles/formation_main.dir/build.make
-bin/formation_main: libformation_core.a
+bin/formation_main: libformation_core_cpp.a
 bin/formation_main: CMakeFiles/formation_main.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/lpp/formation_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable bin/formation_main"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/formation_main.dir/link.txt --verbose=$(VERBOSE)

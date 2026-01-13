@@ -1,1 +1,1 @@
-/usr/bin/c++  -g   CMakeFiles/test_enumeration.dir/test/test_enumeration.cpp.o  -o bin/tests/test_enumeration  libformation_core.a /usr/lib/x86_64-linux-gnu/libgtest.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgtest.a -lpthread 
+/usr/bin/c++   -fPIC   CMakeFiles/test_enumeration.dir/test/test_enumeration.cpp.o  -o bin/tests/test_enumeration  libformation_core_cpp.a /usr/lib/x86_64-linux-gnu/libgtest.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgtest.a -lpthread 

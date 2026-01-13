@@ -40,14 +40,14 @@ def main():
     # 手动赋值所有参数
     args.data_dir = "/home/lpp/formation_test/data"  # 替换为你的训练数据实际路径
     args.map = "/home/lpp/formation_test/data/env_map.pgm"  # 替换为你的PGM文件实际路径
-    df = pd.read_csv(args.data_dir, encoding="utf-8")
-    args.output_dir = "/data"                      # 输出目录（可改）
-    args.feature_dim = 26                          # 特征维度
+    args.output_dir = "/home/lpp/formation_test/data"                      # 输出目录（可改）
+    args.feature_dim = 21                         # 特征维度
     args.batch_size = 32                           # 批次大小
     args.lr = 1e-3                                 # 学习率
     args.resume = None                             # 恢复训练的检查点（无需恢复则为None）
     args.num_robots = 3                            # 机器人数量
-    args.num_graphs = df.iloc[0, 6]                # 控制图数量
+    args.safetyThreshold = 0.5                     # 安全阈值（碰撞风险）
+    args.maxCommDistance = 5.0                     # 最大通信距离
 
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -63,15 +63,24 @@ def main():
 
         try:
             # 读取PGM图像（OpenCV自动识别PGM格式）
-            pgm_path = args.map  # 替换为你的PGM文件实际路径
-            obstacle_threshold = 128  # 灰度阈值，低于该值视为障碍物
-            img = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
+            # pgm_path = args.map  # 替换为你的PGM文件实际路径
+            # obstacle_threshold = 128  # 灰度阈值，低于该值视为障碍物
+            # img = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
         
-            if img is None:
-                print(f"错误：无法读取PGM文件 {pgm_path}（可能路径错误或格式不支持）")
+            # if img is None:
+            #     print(f"错误：无法读取PGM文件 {pgm_path}（可能路径错误或格式不支持）")
             
-            # 灰度值转栅格值
-            grid_map = np.where(img < obstacle_threshold, 1, 0).tolist()
+            # # 灰度值转栅格值
+            # grid_map = np.where(img < obstacle_threshold, 1, 0).tolist()
+
+            # =============测试============ #
+            grid_map = [[0 for _ in range(200)] for _ in range(200)]
+            border = 3
+            for y in range(200):
+                for x in range(200):
+                    # 两侧墙壁逻辑：x小于wall_width 或 x >= width - wall_width 时设为1
+                    if x < border or x >= 200 - border or y < border or y >= 200 - border:
+                        grid_map[y][x] = 1 
     
         except Exception as e:
             print(f"读取PGM失败：{str(e)}")
@@ -87,6 +96,7 @@ def main():
 
         batch_adj_np = np.stack(adj_np_list, axis=0)
         control_graphs = torch.from_numpy(batch_adj_np).float() # shape=(num_graphs, N, N)
+        num_graphs = control_graphs.shape[0]  # 控制图数量
 
         cpp_evaluator = formation_core.FormationEvaluator(0.4, 0.3, 0.3)
         print("Successfully loaded C++ core module")
@@ -97,7 +107,7 @@ def main():
     # 初始化模型
     model = ConstrainedFormationNet(
         feature_dim=args.feature_dim,
-        num_graphs=args.num_graphs,
+        num_graphs=num_graphs,
         num_robots=args.num_robots,
         min_distance=0.5, # 跟随者与领航者的最小距离
         max_distance=3.0, # 跟随者与领航者的最大距离
@@ -108,7 +118,7 @@ def main():
     loss_fn = HybridLoss(imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1, control_graphs=control_graphs) # 混合损失函数
     
     # 初始化训练器
-    trainer = FormationTrainer(model, optimizer, device, cpp_evaluator)
+    trainer = FormationTrainer(model, optimizer, device, cpp_evaluator, grid_map, args.safetyThreshold, args.maxCommDistance)
     
     # 恢复训练（加载上一次未训练完的内容，继续开始训练）
     start_epoch = 0
@@ -134,6 +144,8 @@ def main():
         print(f"Expert ratio: {stage_info['expert_ratio']}")
         print(f"Epochs: {stage_epochs}")
         print(f"Imitation weight: {stage_info['imitation_weight']}")
+
+        # print(1111111111111)
         
         # 获取当前阶段的数据加载器
         train_loader, _ = curriculum_loader.get_stage_dataloader(stage_idx, 'train') # 训练数据加载器（打乱，加载、处理用于数据的训练）
@@ -144,6 +156,8 @@ def main():
             epoch = global_epoch + stage_epoch
             
             print(f"\nEpoch {epoch + 1}/{total_epochs} (Stage {stage_idx + 1}.{stage_epoch + 1})")
+
+            # print(11111111111)
             
             # 确定训练阶段和权重
             # 整个训练过程中，模型的神经网络权重是连续迭代更新的，后一阶段完全基于前一阶段的学习成果继续优化
@@ -160,12 +174,12 @@ def main():
             # 训练一个epoch
             train_loss, loss_components = trainer.train_epoch(
                 train_loader, loss_fn, training_phase, 
-                imitation_weight, stage_idx, grid_map
+                imitation_weight, stage_idx
             )
             
             # 验证
             if stage_epoch % 10 == 0 or stage_epoch == stage_epochs - 1:
-                val_score = trainer.validate(val_loader, stage_idx) # val_loader是验证数据加载器（validate函数现在还没有写）
+                val_score = trainer.validate(val_loader, stage_idx) # val_loader是验证数据加载器
                 print(f"Validation Score: {val_score:.4f}")
             
             # 保存检查点

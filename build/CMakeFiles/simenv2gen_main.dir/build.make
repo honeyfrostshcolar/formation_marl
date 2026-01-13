@@ -79,7 +79,7 @@ simenv2gen_main_EXTERNAL_OBJECTS =
 
 bin/simenv2gen_main: CMakeFiles/simenv2gen_main.dir/src/simenv2gendate/main.cpp.o
 bin/simenv2gen_main: CMakeFiles/simenv2gen_main.dir/build.make
-bin/simenv2gen_main: libformation_core.a
+bin/simenv2gen_main: libformation_core_cpp.a
 bin/simenv2gen_main: CMakeFiles/simenv2gen_main.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/lpp/formation_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable bin/simenv2gen_main"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/simenv2gen_main.dir/link.txt --verbose=$(VERBOSE)

@@ -79,7 +79,7 @@ test_main_EXTERNAL_OBJECTS =
 
 bin/tests/test_main: CMakeFiles/test_main.dir/test/test_main.cpp.o
 bin/tests/test_main: CMakeFiles/test_main.dir/build.make
-bin/tests/test_main: libformation_core.a
+bin/tests/test_main: libformation_core_cpp.a
 bin/tests/test_main: /usr/lib/x86_64-linux-gnu/libgtest.a
 bin/tests/test_main: /usr/lib/x86_64-linux-gnu/libgtest_main.a
 bin/tests/test_main: /usr/lib/x86_64-linux-gnu/libgtest.a

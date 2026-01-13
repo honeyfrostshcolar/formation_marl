@@ -210,13 +210,15 @@ double FormationEvaluator::evaluateCommunicationQuality(
     int validLinks = 0;
     int totalLinks = 0;
     
-    const auto& graph = formation.controlGraph;
-    int numRobots = graph.size();
+    const Eigen::MatrixXi& graph = formation.controlGraph;
+    int numRobots = graph.rows();
+    // std::cout << "graph ：" << graph << "numRobots：" << numRobots << std::endl;
     
     // 遍历控制图的所有边
     for (int i = 0; i < numRobots; ++i) {
         for (int j = 0; j < numRobots; ++j) {
-            if (graph[i][j] == 1) {  // 存在控制关系
+            // std::cout << "i：" << i << "j：" << j << std::endl;
+            if (graph(i, j) == 1) {  // 存在控制关系
                 totalLinks++;
                 
                 // 计算两个机器人之间的距离
@@ -231,6 +233,8 @@ double FormationEvaluator::evaluateCommunicationQuality(
             }
         }
     }
+
+    // std::cout << "222222222222222" << std::endl;
     
     if (totalLinks == 0) {
         return 0.0;  // 没有通信链路
@@ -241,6 +245,8 @@ double FormationEvaluator::evaluateCommunicationQuality(
 
 // 主评估函数
 double FormationEvaluator::evaluateFormation(const Environment& env, const FormationConfig& formation) {
+
+    // std::cout << "1111111111111111" << std::endl;
     // 将跟随者相对位置转换为绝对坐标
     std::vector<Point2D> absolutePositions = 
         convertToAbsolutePositions(formation.positions, env.leaderState);

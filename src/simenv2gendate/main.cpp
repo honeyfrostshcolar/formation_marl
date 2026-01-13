@@ -25,10 +25,13 @@ int main() {
     
     // 3. 生成训练数据集
     std::cout << "开始生成训练数据..." << std::endl;
-    std::vector<TrainingSample> dataset = data_generator.generateDataset(1000, 200, 200, 0.1); //假设左上角坐标为(0.0,0.0)
-    
+    // std::cout << "开始生成测试数据..." << std::endl;
+    std::vector<TrainingSample> dataset = data_generator.generateDataset(500, 250, 250, 0.1); //假设左上角坐标为(0.0,0.0)
+    // std::vector<TrainingSample> dataset = data_generator.generateDataset(1000, 200, 200, 0.1);
+
     // 4. 保存数据集
-    std::string filename = "/home/lpp/formation_test/data/formation_training_data_open_space.csv";
+    std::string filename = "/home/lpp/formation_test/data/formation_data_stage1_easy_val.csv";
+    // std::string filename = "/home/lpp/formation_test/data/formation_data_stage1_easy_train.csv";
     data_generator.saveDataset(dataset, filename);
     
     // // 5. 显示统计信息
