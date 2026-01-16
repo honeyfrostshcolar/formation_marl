@@ -79,7 +79,7 @@ test_transformation_EXTERNAL_OBJECTS =
 
 bin/tests/test_transformation: CMakeFiles/test_transformation.dir/test/test_transformation.cpp.o
 bin/tests/test_transformation: CMakeFiles/test_transformation.dir/build.make
-bin/tests/test_transformation: libformation_core.a
+bin/tests/test_transformation: libformation_core_cpp.a
 bin/tests/test_transformation: /usr/lib/x86_64-linux-gnu/libgtest.a
 bin/tests/test_transformation: /usr/lib/x86_64-linux-gnu/libgtest_main.a
 bin/tests/test_transformation: /usr/lib/x86_64-linux-gnu/libgtest.a

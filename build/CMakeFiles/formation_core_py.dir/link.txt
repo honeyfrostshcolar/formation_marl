@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC  -fPIC  -shared  -o script/formation_core.cpython-310-x86_64-linux-gnu.so CMakeFiles/formation_core_py.dir/src/formationlearning/pybind11_interface.cpp.o  -flto libformation_core_cpp.a 

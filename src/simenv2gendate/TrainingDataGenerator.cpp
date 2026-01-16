@@ -67,11 +67,14 @@ TrainingSample TrainingDataGenerator::generateSample(const std::string& env_type
     
     // 提取特征
     sample.features = feature_extractor_.extractFeatures(lidar_data);
-    
+
     // 生成专家标注
-    if(expert_prob(rng_) < 0.4){
-        sample.expert_formation = generateExpertFormation(env_type, sample.features, sample.expert_confidence);
-    } 
+    // ============== 是否生成专家标注 ============== //
+    // if(expert_prob(rng_) < 0.4){
+    //     sample.expert_formation = generateExpertFormation(env_type, sample.features, sample.expert_confidence);
+    // } 
+    
+    sample.expert_formation.ctrlnums = control_graphs_.size();
 
     sample.has_expert_label = (sample.expert_formation.controlGraph.sum() != 0); //是否有专家数据
     
@@ -114,7 +117,7 @@ void TrainingDataGenerator::saveDataset(const std::vector<TrainingSample>& datas
 
     // 更新标题行
     file << "env_type,robot_x,robot_y,robot_theta,has_expert_label,expert_confidence,";
-    file << "ctrlnums, controlGraph, robot_positions,";
+    file << "ctrlnums,controlGraph,robot_positions,";
     file << "corridor_width,front_clearance,left_clearance,right_clearance,obstacle_density,";
 
     for (int i = 0; i < 8; ++i) {
@@ -145,7 +148,7 @@ FormationConfig TrainingDataGenerator::generateExpertFormation(const std::string
                                                               const EnvironmentFeatures& features,
                                                               double& confidence) { //我先暂时不去管置信度
     FormationConfig expert;
-    expert.ctrlnums = control_graphs_.size();
+    // expert.ctrlnums = control_graphs_.size();
     
     confidence = 1.0;
     // 简化规则：根据环境类型选择编队

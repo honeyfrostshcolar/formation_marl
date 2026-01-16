@@ -25,7 +25,7 @@ CMAKE_AR:FILEPATH=/usr/bin/ar
 
 //Choose the type of build, options are: None Debug Release RelWithDebInfo
 // MinSizeRel ...
-CMAKE_BUILD_TYPE:STRING=Debug
+CMAKE_BUILD_TYPE:STRING=
 
 //Enable/Disable color output during build.
 CMAKE_COLOR_MAKEFILE:BOOL=ON
@@ -240,6 +240,21 @@ GTEST_MAIN_LIBRARY_DEBUG:FILEPATH=GTEST_MAIN_LIBRARY_DEBUG-NOTFOUND
 //The directory containing a CMake configuration file for GTest.
 GTest_DIR:PATH=GTest_DIR-NOTFOUND
 
+//Python version to use for compiling modules
+PYBIND11_PYTHON_VERSION:STRING=
+
+//Path to a program.
+PYTHON_EXECUTABLE:FILEPATH=/home/lpp/miniconda3/envs/py310/bin/python
+
+//Path to a library.
+PYTHON_LIBRARY:FILEPATH=/home/lpp/miniconda3/envs/py310/lib/libpython3.10.so
+
+//Dependencies for the target
+formation_core_py_LIB_DEPENDS:STATIC=general;formation_core_cpp;
+
+//The directory containing a CMake configuration file for pybind11.
+pybind11_DIR:PATH=/usr/lib/cmake/pybind11
+
 
 ########################
 # INTERNAL cache entries
@@ -382,6 +397,10 @@ CMAKE_UNAME:INTERNAL=/usr/bin/uname
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
 //Details about finding GTest
 FIND_PACKAGE_MESSAGE_DETAILS_GTest:INTERNAL=[/usr/lib/x86_64-linux-gnu/libgtest.a][/usr/include][/usr/lib/x86_64-linux-gnu/libgtest_main.a][v()]
+//Details about finding PYTHON
+FIND_PACKAGE_MESSAGE_DETAILS_PYTHON:INTERNAL=/home/lpp/miniconda3/envs/py310/bin/python
+//Details about finding PythonInterp
+FIND_PACKAGE_MESSAGE_DETAILS_PythonInterp:INTERNAL=[/home/lpp/miniconda3/envs/py310/bin/python][v3.10.4()]
 //ADVANCED property for variable: GMOCK_LIBRARY
 GMOCK_LIBRARY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: GMOCK_LIBRARY_DEBUG
@@ -400,4 +419,12 @@ GTEST_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
 GTEST_MAIN_LIBRARY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: GTEST_MAIN_LIBRARY_DEBUG
 GTEST_MAIN_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
+//Test HAS_FLTO
+HAS_FLTO:INTERNAL=1
+PYBIND11_LTO_CXX_FLAGS:INTERNAL=-flto;-fno-fat-lto-objects
+PYBIND11_LTO_LINKER_FLAGS:INTERNAL=-flto
+//ADVANCED property for variable: PYTHON_EXECUTABLE
+PYTHON_EXECUTABLE-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: PYTHON_LIBRARY
+PYTHON_LIBRARY-ADVANCED:INTERNAL=1
 

@@ -79,7 +79,7 @@ test_enumeration_EXTERNAL_OBJECTS =
 
 bin/tests/test_enumeration: CMakeFiles/test_enumeration.dir/test/test_enumeration.cpp.o
 bin/tests/test_enumeration: CMakeFiles/test_enumeration.dir/build.make
-bin/tests/test_enumeration: libformation_core.a
+bin/tests/test_enumeration: libformation_core_cpp.a
 bin/tests/test_enumeration: /usr/lib/x86_64-linux-gnu/libgtest.a
 bin/tests/test_enumeration: /usr/lib/x86_64-linux-gnu/libgtest_main.a
 bin/tests/test_enumeration: /usr/lib/x86_64-linux-gnu/libgtest.a

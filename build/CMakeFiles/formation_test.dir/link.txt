@@ -1,1 +1,0 @@
-/usr/bin/c++   -Wall -Wextra -Werror -O2   CMakeFiles/formation_test.dir/test/test_main.cpp.o CMakeFiles/formation_test.dir/src/core/control_graph.cpp.o CMakeFiles/formation_test.dir/src/core/constraints.cpp.o  -o formation_test 
