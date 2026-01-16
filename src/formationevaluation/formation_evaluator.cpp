@@ -11,7 +11,7 @@ Environment::Environment(const std::vector<std::vector<int>>& grid,
     : gridMap(grid), leaderState(state), safetyThreshold(safety), maxCommDistance(commDist) {
 
     // 模拟激光雷达扫描
-    simulateLidar();
+    simulateLidar(360, 10.0);
     // 计算通道宽度
     calculateCorridorWidth();
 
@@ -26,6 +26,10 @@ void Environment::simulateLidar(int numBeams , double maxRange ) {
         double angle = leaderState.orientation + i * angleStep;
         lidarScan[i] = rayCast(leaderState.position, angle, maxRange);
     }
+    
+    // for (int i = 0; i < numBeams; ++i) {
+    //     std::cout << "lidarScan[" << i << "]：" << lidarScan[i] << std::endl;
+    // }
 }
 
 // 射线投射
@@ -58,15 +62,17 @@ double Environment::rayCast(const Point2D& start, double angle, double maxRange)
 // 计算通道宽度
 void Environment::calculateCorridorWidth() {
     int numBeams = lidarScan.size();
+    // std::cout << "numBeams：" << numBeams << std::endl;
     // 假设激光雷达数据中，索引0为前方，索引90为左侧，索引270为右侧
     // 然后不应该计算左右两边的距离，应该再保守一点，可以计算80度和280度的距离
     int leftIndex = numBeams / 4.5;   // 80度
     int rightIndex = 3 * numBeams / 4.5; // 280度
 
-    double leftDist = lidarScan[leftIndex] * std::sin(80 * M_PI / 180.0); // 计算垂直距离
-    double rightDist = lidarScan[rightIndex] * std::sin(280 * M_PI / 180.0); // 计算垂直距离
+    double leftDist = std::abs(lidarScan[leftIndex] * std::sin(80 * M_PI / 180.0)); // 计算垂直距离
+    double rightDist = std::abs(lidarScan[rightIndex] * std::sin(280 * M_PI / 180.0)); // 计算垂直距离
 
     corridorWidth = leftDist + rightDist;
+
 }
 
 // 构造函数实现
@@ -103,7 +109,9 @@ double FormationEvaluator::evaluateNavigationEfficiency(
     
     // 计算编队宽度（在前进方向的横向宽度）
     double formationWidth = calculateFormationWidth(formation, absolutePositions, env.leaderState.orientation);
-    
+    // std::cout << "formationWidth：" << formationWidth << std::endl;
+    // std::cout << "corridorWidth：" << env.corridorWidth << std::endl;
+
     // 计算效率得分：编队宽度与通道宽度的匹配程度
     double widthDifference = std::abs(formationWidth - env.corridorWidth);
     double efficiencyScore = std::exp(-widthDifference / env.corridorWidth);
@@ -256,6 +264,8 @@ double FormationEvaluator::evaluateFormation(const Environment& env, const Forma
     double collisionScore = evaluateCollisionRisk(env, absolutePositions);
     double commScore = evaluateCommunicationQuality(formation, absolutePositions, env.maxCommDistance);
     
+    //std::cout << "navScore：" << navScore << std::endl;
+
     // 综合得分
     double totalScore = w_navigation * navScore + 
                        w_collision * (1 - collisionScore) + 

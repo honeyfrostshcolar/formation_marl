@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
+import sys
 import formation_core 
 
 class FormationTrainer:
@@ -11,7 +12,7 @@ class FormationTrainer:
     编队学习训练器 - 实现混合学习策略
     """
     
-    def __init__(self, model, optimizer, device, cpp_evaluator, grid_map, safetyThreshold, maxCommDistance):
+    def __init__(self, model, optimizer, device, cpp_evaluator, grid_map, control_graphs, safetyThreshold, maxCommDistance):
         self.model = model.to(device) # 把模型放到GPU/CPU（就是ConstrainedFormationNet）
         self.optimizer = optimizer # 优化器（用于更新模型参数，是谁？？？）
         self.device = device # 训练设备（cuda/GPU 或 cpu）
@@ -19,6 +20,7 @@ class FormationTrainer:
         self.grid_map = grid_map
         self.safetyThreshold = safetyThreshold
         self.maxCommDistance = maxCommDistance
+        self.control_graphs = control_graphs
         
         # 训练历史（记录每个epoch的损失和验证分数，可用于可视化）
         self.train_losses = []
@@ -59,6 +61,10 @@ class FormationTrainer:
 
             # 准备数据
             features = batch['features'].to(self.device)
+
+            if torch.isnan(features).any() or torch.isinf(features).any():
+                print(f"❌ Batch {batch_idx}: 输入数据包含NaN或Inf")
+            
             leader_pose = batch['leader_pose']
             environment_type = batch['environment_type']
             
@@ -83,12 +89,19 @@ class FormationTrainer:
                                                 environment_type, curriculum_stage
                                                 )
             
-            print(333333333333)
+            # if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+            #    print("❌ 优势函数包含NaN/Inf，重置为零")
+            
+            # print(333333333333)
             # 准备专家数据
             if expert_positions is not None:
                 expert_positions = expert_positions.to(self.device)
                 # expert_graph_idx = expert_graph_idx.to(self.device) #这个现在我已经删了
                 has_expert_mask = has_expert.to(self.device)
+                has_expert_mask = has_expert_mask.bool()
+                # print("has_expert_mask:", has_expert_mask)
+                # print("expert_positions:", expert_positions)
+                # sys.exit("stop here")
             else:
                 # 如果没有专家数据，创建空的mask
                 has_expert_mask = torch.zeros(features.size(0), dtype=torch.bool, device=self.device)
@@ -102,22 +115,28 @@ class FormationTrainer:
                 expert_graph, advantages, has_expert_mask
             )
             
+            # print("loss" ,loss)
+            # print("losses_dict", losses_dict)
             # 反向传播
             self.optimizer.zero_grad() # 清空上一轮的梯度（为当前轮的梯度计算做准备）
             loss.backward()  # 计算当前损失的梯度（反向传播）
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0) # 梯度裁剪（防止梯度爆炸）
             self.optimizer.step() # 更新模型参数（根据梯度和学习率）
-
-            print("=== 第一个batch参数更新后，检查是否有nan/inf ===")
+            
             for name, param in self.model.named_parameters():
                 has_nan = torch.isnan(param).any()
                 has_inf = torch.isinf(param).any()
                 if has_nan or has_inf:
                     print(f"❌ 参数 {name} 被污染：nan={has_nan.item()}, inf={has_inf.item()}")
+                    sys.exit("stop here")
                     break  # 找到第一个污染的参数，直接退出
-            
+          
+
+            # for key, val in losses_dict.items():
+            #     print(f"key: {key}, 类型: {type(val)}, 值: {val}")
+
             # 记录损失
-            total_loss += loss.item()
+            total_loss += loss.item() # item() 方法将单元素张量转换为 Python 数值 
             for key in loss_components:
                 loss_components[key] += losses_dict[key].item()
             
@@ -187,7 +206,8 @@ class FormationTrainer:
                 score = self.cpp_evaluator.evaluate_formation(env, formation_config)
                 advantages[i, j] = score
 
-        
+        # print("advantages before norm:", advantages)
+        # sys.exit("stop here")
         # 归一化优势函数
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
@@ -216,27 +236,52 @@ class FormationTrainer:
         with torch.no_grad():
             for batch in dataloader:
                 features = batch['features'].to(self.device)
-                leader_pose = batch['leader_pose']
+                leader_poses = batch['leader_pose']
                 environment_type = batch['environment_type']
                 
                 # 前向传播
                 pred_positions, pred_scores = self.model(features, "imitation")
-                print(pred_scores)
+                # print(pred_scores)
                 
                 # 选择最佳编队
-                best_graph_idx = torch.argmax(pred_scores, dim=1)
+                best_graph_idx = torch.argmax(pred_scores, dim=1) # 找到每个样本中得分最高的编队索引（dim=1 表示在每个样本的(num_graphs)个得分中选择最大的）
+                # print(best_graph_idx)
                 best_positions = pred_positions[torch.arange(pred_positions.size(0)), best_graph_idx]
+                # print(best_positions)
                 
                 # 计算得分
                 for i in range(features.size(0)):
 
-                    absolute_positions = self._relative_to_absolute(
-                        best_positions[i].cpu().numpy(), leader_pose[i]
-                    )
-                    
-                    score = self.cpp_evaluator.evaluate_formation(
-                        environment_type[i], absolute_positions, leader_pose[i]
-                    )
+                    # absolute_positions = self._relative_to_absolute(
+                    #     best_positions[i].cpu().numpy(), leader_pose[i]
+                    # )
+
+                    # positions = pred_positions[i, j].detach().cpu().numpy() # 提取第i个样本、第j个编队的预测位置（相对位置）
+                  
+                    formation_config = formation_core.FormationConfig()
+                    formation_config.control_graph = self.control_graphs[best_graph_idx[i]].tolist()
+                    # print("formation_config.control_graph:", formation_config.control_graph)
+
+                    positions_list = []
+                    for pos in best_positions[i]:
+                        pos_cpp = formation_core.Point2D()
+                        pos_cpp.x = pos[0]
+                        pos_cpp.y = pos[1]
+                        positions_list.append(pos_cpp)
+
+                    formation_config.positions = positions_list
+
+                    leader_pose_cpp = formation_core.RobotState()
+                    leader_pose_cpp.position.x = leader_poses["position"]["x"][i]
+                    leader_pose_cpp.position.y = leader_poses["position"]["y"][i]
+                    leader_pose_cpp.orientation = leader_poses["orientation"][i]
+
+                    # 转换为C++环境
+                    env = formation_core.Environment(self.grid_map, leader_pose_cpp, self.safetyThreshold, self.maxCommDistance) # 最后两个参数是安全阈值（碰撞风险）和最大通信距离
+
+                    # print(formation_config.control_graph)
+                    # 使用C++评估函数计算得分：evaluateFormation(const Environment& env, const FormationConfig& formation) 
+                    score = self.cpp_evaluator.evaluate_formation(env, formation_config)
                     
                     total_score += score
                     num_samples += 1

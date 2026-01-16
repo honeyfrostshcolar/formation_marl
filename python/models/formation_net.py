@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import sys
 
 class ConstrainedFormationNet(nn.Module):
     """
@@ -23,7 +24,7 @@ class ConstrainedFormationNet(nn.Module):
         self.max_distance = max_distance # 跟随者与领航者的最大距离
         self.angle_min, self.angle_max = angle_range # 跟随者与领航者的角度范围
 
-        self.input_norm = nn.BatchNorm1d(feature_dim, affine=True, track_running_stats=True)
+        self.input_norm = nn.LayerNorm(feature_dim)
         
         ###### 初始化神经网络模块
         # 共享特征编码器
@@ -73,7 +74,7 @@ class ConstrainedFormationNet(nn.Module):
             training_phase: 训练阶段 ("imitation", "mixed", "rl_finetune")
         """
         batch_size = x.size(0) # 获取批量大小
-        # print("输入特征:", x)
+        #print("batch_size:", batch_size)
         
         # 特征编码
         encoded = self.encoder(x) # [batch_size, 32]
@@ -203,42 +204,63 @@ class HybridLoss(nn.Module):
         batch_size = pred_positions.size(0)
 
         # 获取专家选择的控制图索引
-        expert_graph_idx = torch.zeros(batch_size, dtype=torch.long, device=pred_positions.device)
+        expert_graph_idx = torch.full((batch_size,), -1, dtype=torch.long, device=pred_positions.device)
         for i in range(batch_size):
             for j in range(self.control_graphs.shape[0]):
                 if torch.equal(expert_graph[i], self.control_graphs[j]):
                     expert_graph_idx[i] = j
                     break
+
+        # print("control_graphs:", self.control_graphs)  
+        # print("expert_graph:", expert_graph)
+        # print("expert_graph_idx:", expert_graph_idx)
+        
         
         # 1. 模仿学习损失（仅对有专家标注的样本）
-        imitation_loss = 0.0
+        imitation_loss = torch.tensor(0.0, device=pred_positions.device, requires_grad=False)
         if has_expert_mask.any():
             # 位置损失
-            expert_selected_positions = pred_positions[has_expert_mask, expert_graph_idx[has_expert_mask]]
-            position_loss = self.mse_loss(expert_selected_positions, expert_positions[has_expert_mask])
+            pred_expert_positions = pred_positions[has_expert_mask, expert_graph_idx[has_expert_mask]]
+
+            # print("pred_expert_positions:", pred_expert_positions)
+            # print("expert_positions:", expert_positions[has_expert_mask])
+            # print("has_expert_mask:", has_expert_mask)
+            # print("expert_positions:", expert_positions)
+            # # print("has_expert_mask 数据类型：", has_expert_mask.dtype)
+            # sys.exit("stop here")
+            position_loss = self.mse_loss(pred_expert_positions, expert_positions[has_expert_mask])
             
             # 分类损失（控制图选择）
             classification_loss = self.ce_loss(pred_scores[has_expert_mask], expert_graph_idx[has_expert_mask])
-
-            print(position_loss, classification_loss)
+            # print("pred_scores:", pred_scores[has_expert_mask])
+            # print("expert_graph_idx:", expert_graph_idx[has_expert_mask])
             
+
+            # print(position_loss, classification_loss)
+            # sys.exit("stop here")
+
             imitation_loss = position_loss + classification_loss
         
         # 2. 强化学习损失（对所有样本）但是这个pred_scores指的是控制图的分数，不是位置
         # 目前由于位置是连续的，所以强化学习损失只作用于控制图选择上，之后可以尝试一下用其他强化学习方法来优化位置（比如PPO）
+        # print("advantages:", advantages)
+        # print("pred_scores:", pred_scores)
+        # sys.exit("stop here")
         log_probs = F.log_softmax(pred_scores, dim=1) # 获取对数概率
         rl_loss = -torch.mean(log_probs * advantages) # advantages代表了奖励
         
         # 3. 多样性损失（鼓励不同控制图生成不同的位置）
         diversity_loss = self._compute_diversity_loss(pred_positions)
 
-        self.rl_weight = 0.0
-        self.diversity_weight = 0.0
+        # self.rl_weight = 0.0
+        # self.diversity_weight = 0.0
         
         # 加权组合
         total_loss = (self.imitation_weight * imitation_loss + 
                      self.rl_weight * rl_loss + 
                      self.diversity_weight * diversity_loss)
+        
+        # print("total_loss, imitation_loss, rl_loss, diversity_loss", total_loss, imitation_loss, rl_loss, diversity_loss)
         
         return total_loss, {
             'imitation_loss': imitation_loss,

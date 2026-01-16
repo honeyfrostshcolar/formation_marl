@@ -43,7 +43,7 @@ def main():
     args.output_dir = "/home/lpp/formation_test/data"                      # 输出目录（可改）
     args.feature_dim = 21                         # 特征维度
     args.batch_size = 32                           # 批次大小
-    args.lr = 1e-3                                 # 学习率
+    args.lr = 1e-5                                 # 学习率
     args.resume = None                             # 恢复训练的检查点（无需恢复则为None）
     args.num_robots = 3                            # 机器人数量
     args.safetyThreshold = 0.5                     # 安全阈值（碰撞风险）
@@ -96,6 +96,8 @@ def main():
 
         batch_adj_np = np.stack(adj_np_list, axis=0)
         control_graphs = torch.from_numpy(batch_adj_np).float() # shape=(num_graphs, N, N)
+        # print("Successfully loaded control graphs from C++ enumerator", control_graphs)
+        # sys.exit("stop here")
         num_graphs = control_graphs.shape[0]  # 控制图数量
 
         cpp_evaluator = formation_core.FormationEvaluator(0.4, 0.3, 0.3)
@@ -118,7 +120,7 @@ def main():
     loss_fn = HybridLoss(imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1, control_graphs=control_graphs) # 混合损失函数
     
     # 初始化训练器
-    trainer = FormationTrainer(model, optimizer, device, cpp_evaluator, grid_map, args.safetyThreshold, args.maxCommDistance)
+    trainer = FormationTrainer(model, optimizer, device, cpp_evaluator, grid_map, control_graphs, args.safetyThreshold, args.maxCommDistance)
     
     # 恢复训练（加载上一次未训练完的内容，继续开始训练）
     start_epoch = 0

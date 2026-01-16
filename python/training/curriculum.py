@@ -48,6 +48,8 @@ class FormationDataset(Dataset):
         
         # 专家标注（如果有）
         has_expert = sample['has_expert_label']
+
+        # print("has_expert:", has_expert)
         if has_expert:
 
             ctrlGraph_str = sample["controlGraph"] 
@@ -70,6 +72,7 @@ class FormationDataset(Dataset):
                 expert_positions_list.append(col_vals)
 
             expert_positions = torch.tensor(expert_positions_list, dtype=torch.float32)
+            # print("expert_positions:", expert_positions)
 
             # expert_graph_idx = int(sample['expert_graph_index'])
             
