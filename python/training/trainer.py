@@ -17,10 +17,10 @@ class FormationTrainer:
         self.optimizer = optimizer # 优化器（用于更新模型参数，是谁？？？）
         self.device = device # 训练设备（cuda/GPU 或 cpu）
         self.cpp_evaluator = cpp_evaluator # C++评估器（判断编队好坏的核心工具， RL中“奖励信号”的来源）
-        self.grid_map = grid_map
-        self.safetyThreshold = safetyThreshold
-        self.maxCommDistance = maxCommDistance
-        self.control_graphs = control_graphs
+        self.grid_map = grid_map # 网格地图（环境表示，用于评估碰撞风险）
+        self.safetyThreshold = safetyThreshold # 安全阈值（用于判断碰撞风险）
+        self.maxCommDistance = maxCommDistance # 最大通信距离（用于限制机器人之间的通信范围）
+        self.control_graphs = control_graphs # 控制图（定义了机器人之间的通信拓扑结构）
         
         # 训练历史（记录每个epoch的损失和验证分数，可用于可视化）
         self.train_losses = []
@@ -82,7 +82,7 @@ class FormationTrainer:
             # 网络调整阶段
             # 预测的位置： [batch_size, num_graphs, num_robots, 2] 包括了所有控制图对跟随者的预测位置（领航者位置是相对位置[0,0]）
             # 预测的编队分数： [batch_size, num_graphs] 包括了每个控制图的评分
-            pred_positions, pred_scores = self.model(features, training_phase) #初始化的时候ConstrainedFormationNet就是model
+            pred_positions, pred_scores = self.model(features, self.control_graphs.shape[1], self.control_graphs,training_phase) #初始化的时候ConstrainedFormationNet就是model
             
             # 计算优势函数（强化学习），这个优势函数计算的是Environment& env下 FormationConfig& formation的优势
             advantages = self._compute_advantages(pred_positions, leader_pose, expert_graph,
@@ -240,7 +240,7 @@ class FormationTrainer:
                 environment_type = batch['environment_type']
                 
                 # 前向传播
-                pred_positions, pred_scores = self.model(features, "imitation")
+                pred_positions, pred_scores = self.model(features, self.control_graphs.shape[1], self.control_graphs ,"imitation")
                 # print(pred_scores)
                 
                 # 选择最佳编队

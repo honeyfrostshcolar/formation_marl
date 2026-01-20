@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import sys
+from torch_geometric.nn import GATConv
 
 class ConstrainedFormationNet(nn.Module):
     """
@@ -39,22 +40,57 @@ class ConstrainedFormationNet(nn.Module):
             nn.Linear(64, 32),
             nn.ReLU()
         )
-        
-        # 位置生成分支 - 为每个控制图生成跟随者位置
-        self.position_generators = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(32, 64),
-                nn.ReLU(),
-                nn.Linear(64, 2 * self.num_followers)  # 输出极坐标参数
-            ) for _ in range(num_graphs)
+
+        # 2. GNN层（处理可变节点数）
+        self.gnn_layers = nn.ModuleList([
+            GATConv(4 + 32 + 16, 64, heads=2, concat=False),  # 输入: 4(机器人) + 32(环境) + 16(图结构) = 52
+            GATConv(64, 64, heads=2, concat=False),
+            GATConv(64, 64, heads=2, concat=False)
         ])
         
-        # 编队选择分支
-        self.formation_selector = nn.Sequential(
-            nn.Linear(32, 16),
+        # 3. 位置生成器（单个，但接受图类型作为输入）
+        self.position_generator = nn.Sequential(
+            nn.Linear(64, 128),
             nn.ReLU(),
-            nn.Linear(16, num_graphs)
+            nn.Linear(128, 2)  # 每个机器人输出2D位置
         )
+        
+        # 4. 图结构编码器（将控制图编码为特征向量）
+        # 假设最大机器人数量为max_robots = 10
+        self.graph_encoder = nn.Sequential(
+            nn.Linear(10 * 10, 128),  # 邻接矩阵展平
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 16)  # 16维图特征
+        )
+        
+        # 5. 编队选择器（动态处理不同数量的图）
+        # 不再输出固定数量的分数，而是通过图匹配计算分数
+        self.formation_scorer = nn.Sequential(
+            nn.Linear(64 + 16, 32),  # 节点特征 + 图特征
+            nn.ReLU(),
+            nn.Linear(32, 1)  # 单个分数
+        )
+        
+        # 6. 机器人ID嵌入
+        self.robot_embedding = nn.Embedding(10, 4)
+        
+        # # 位置生成分支 - 为每个控制图生成跟随者位置
+        # self.position_generators = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Linear(32, 64),
+        #         nn.ReLU(),
+        #         nn.Linear(64, 2 * self.num_followers)  # 输出极坐标参数
+        #     ) for _ in range(num_graphs)
+        # ])
+        
+        # # 编队选择分支
+        # self.formation_selector = nn.Sequential(
+        #     nn.Linear(32, 16),
+        #     nn.ReLU(),
+        #     nn.Linear(16, num_graphs)
+        # )
         
         # 位置微调模块（用于后期强化学习微调）
         self.position_refiners = nn.ModuleList([
@@ -65,64 +101,193 @@ class ConstrainedFormationNet(nn.Module):
             ) for _ in range(num_graphs)
         ])
         
-    def forward(self, x, training_phase="imitation"):
+    def forward(self, env_features, robot_count, candidate_graphs, training_phase="imitation"):
         """
         前向传播
         
         Args:
-            x: 环境特征 [batch_size, feature_dim]
+            env_features: 环境特征 [batch_size, feature_dim]
             training_phase: 训练阶段 ("imitation", "mixed", "rl_finetune")
+            robot_count: 整数，机器人数量
+            candidate_graphs: 列表，每个元素是一个邻接矩阵 [robot_count, robot_count]
+                            不同机器人数量对应的图数量不同
         """
-        batch_size = x.size(0) # 获取批量大小
+        batch_size = env_features.size(0) # 获取批量大小
         #print("batch_size:", batch_size)
         
         # 特征编码
-        encoded = self.encoder(x) # [batch_size, 32]
+        env_encoded = self.encoder(env_features) # [batch_size, 32]
 
-        # 基础位置生成
-        base_positions = []
-        for i, generator in enumerate(self.position_generators):
-            # 通过神经网络生成极坐标参数 [batch_size, num_followers, 2]
-            polar_params = generator(encoded).view(batch_size, self.num_followers, 2)
-            
-            # 应用约束转换为直角坐标
-            positions = self._polar_to_constrained_cartesian(polar_params) # [batch_size, num_followers, 2]
-            base_positions.append(positions) # [num_graphs, batch_size, num_followers, 2]
+        all_results = []
+        all_scores = []
+        
+        # 2. 对每个候选控制图单独处理
+        for graph_idx, adj_matrix in enumerate(candidate_graphs):
+            # adj_matrix: [robot_count, robot_count]
 
-        # 根据训练阶段决定是否使用微调
-        if training_phase == "rl_finetune":
-            refined_positions = []
-            for i, (base_pos, refiner) in enumerate(zip(base_positions, self.position_refiners)):
-                # 将基础位置和编码特征结合进行微调
-                # refiner_input是[batch_size, 32 + num_followers*2]
-                refiner_input = torch.cat([encoded, base_pos.view(batch_size, -1)], dim=1) # base_pos.view(batch_size, -1)是[batch_size, num_followers*2]
-                delta_polar = refiner(refiner_input).view(batch_size, self.num_followers, 2) # [batch_size, num_followers, 2]
-                
-                # 应用小幅度调整（限制调整幅度）
-                delta_polar = torch.tanh(delta_polar) * 0.1  # 限制在±0.1范围内
-                refined_polar = self._cartesian_to_polar(base_pos) + delta_polar
-                
-                # 重新应用约束
-                refined_pos = self._polar_to_constrained_cartesian(refined_polar) ## 应用约束转换为直角坐标
-                refined_positions.append(refined_pos)
+            pad_size = (0, 10 - robot_count, 0, 10 - robot_count)  # (左,右,上,下)
+            adj_matrix_padded = torch.nn.functional.pad(adj_matrix, pad_size, mode='constant', value=0).to(env_features.device)
             
-            all_positions = refined_positions
+            # 2.1 编码图结构
+            graph_flat = adj_matrix_padded.flatten().unsqueeze(0).repeat(batch_size, 1).to(env_features.device)  # flatten：把 2D 邻接矩阵拉成 1D 向量，unsqueeze：在第 0 维添加一个维度，repeat：复制 batch_size 次
+            graph_feat = self.graph_encoder(graph_flat)  # [batch_size, 16]
+            
+            # 2.2 构建机器人节点特征
+            node_features_list = []
+            for robot_idx in range(robot_count):
+                # 机器人ID特征
+                robot_id_feat = self.robot_embedding(
+                    torch.tensor([robot_idx], device=env_features.device)
+                ).expand(batch_size, -1)  # [batch_size, 4]
+                
+                # 合并：机器人ID + 环境特征 + 图特征
+                node_feat = torch.cat([
+                    robot_id_feat,  # [batch_size, 4]
+                    env_encoded,    # [batch_size, 32]
+                    graph_feat      # [batch_size, 16]
+                ], dim=1)  # [batch_size, 52]
+                
+                node_features_list.append(node_feat)
+            
+            node_features = torch.stack(node_features_list, dim=1)  # [batch_size, robot_count, 52]
+            
+            # 2.3 构建图边
+            edge_index = self._adj_matrix_to_edge_index(adj_matrix).to(env_features.device)
+            edge_index_batch = self._batch_edge_index(edge_index, robot_count, batch_size)
+            
+            # 2.4 GNN处理（PyG 的 GAT 层只认这种“节点×特征”格式）
+            node_features_flat = node_features.view(-1, 52)  # [batch_size * robot_count, 52]把三维张量拍成二维，不拷贝数据，只换视图，方便后续层处理。
+            
+            for gnn_layer in self.gnn_layers:
+                node_features_flat = gnn_layer(node_features_flat, edge_index_batch)
+                node_features_flat = F.relu(node_features_flat) # ReLU 激活函数
+            
+            # 恢复形状
+            node_features_out = node_features_flat.view(batch_size, robot_count, -1)  # [batch_size, robot_count, 64]
+            
+            # 2.5 生成位置
+            # 只生成跟随者位置
+            follower_polar_params = []  # 存储极坐标参数
+        
+            for follower_idx in range(1, robot_count):
+                follower_feat = node_features_out[:, follower_idx, :]  # [batch_size, 64]
+                
+                # 生成极坐标参数，然后通过约束函数转换
+                polar_param = self.position_generator(follower_feat)  # [batch_size, 2]
+                follower_polar_params.append(polar_param)
+            
+            # 将极坐标参数堆叠
+            polar_params_tensor = torch.stack(follower_polar_params, dim=1)  # [batch_size, num_followers, 2]
+            
+            # 应用您的极坐标约束转换为直角坐标
+            follower_positions_tensor = self._polar_to_constrained_cartesian(polar_params_tensor)
+            
+            # 2.6 计算编队分数
+            # 全局特征（平均池化）
+            global_feat = torch.mean(node_features_out, dim=1)  # [batch_size, 64]
+            # 与图特征合并
+            score_input = torch.cat([global_feat, graph_feat], dim=1)  # [batch_size, 80]
+            scores = self.formation_scorer(score_input)  # [batch_size, 1]
+            
+            all_results.append(follower_positions_tensor) # [batch_size, robot_count, 2]
+            all_scores.append(scores) # [batch_size, 1]
+        
+        # 3. 合并结果
+        # 注意：不同候选图可能有不同数量，不能直接stack
+        # 我们需要保持列表形式，或者填充到最大数量
+        if len(candidate_graphs) > 0:
+            # 找到最大机器人数量（通常相同）
+            max_robots_in_batch = robot_count
+            
+            # 将分数堆叠
+            scores_tensor = torch.cat(all_scores, dim=1)  # [batch_size, num_candidate_graphs]
+            
+            # 将位置堆叠
+            follower_positions_stacked = torch.stack(all_results, dim=1)  # [batch_size, num_candidate_graphs, robot_count, 2]
+            # 添加领航者位置 (0, 0)
+            leader_positions = torch.zeros(batch_size, len(candidate_graphs), 1, 2, 
+                                        device=env_features.device)
+            
+            # 完整位置
+            full_positions = torch.cat([leader_positions, follower_positions_stacked], dim=2)  # [batch_size, num_graphs, robot_count, 2]
         else:
-            all_positions = base_positions #[]
+            full_positions = torch.zeros(batch_size, 0, robot_count, 2, device=env_features.device)
+            scores_tensor = torch.zeros(batch_size, 0, device=env_features.device)
+
+
+
+
+
+
+        # # 基础位置生成
+        # base_positions = []
+        # for i, generator in enumerate(self.position_generators):
+        #     # 通过神经网络生成极坐标参数 [batch_size, num_followers, 2]
+        #     polar_params = generator(encoded).view(batch_size, self.num_followers, 2)
+            
+        #     # 应用约束转换为直角坐标
+        #     positions = self._polar_to_constrained_cartesian(polar_params) # [batch_size, num_followers, 2]
+        #     base_positions.append(positions) # [num_graphs, batch_size, num_followers, 2]
+
+        # # 根据训练阶段决定是否使用微调
+        # if training_phase == "rl_finetune":
+        #     refined_positions = []
+        #     for i, (base_pos, refiner) in enumerate(zip(base_positions, self.position_refiners)):
+        #         # 将基础位置和编码特征结合进行微调
+        #         # refiner_input是[batch_size, 32 + num_followers*2]
+        #         refiner_input = torch.cat([encoded, base_pos.view(batch_size, -1)], dim=1) # base_pos.view(batch_size, -1)是[batch_size, num_followers*2]
+        #         delta_polar = refiner(refiner_input).view(batch_size, self.num_followers, 2) # [batch_size, num_followers, 2]
+                
+        #         # 应用小幅度调整（限制调整幅度）
+        #         delta_polar = torch.tanh(delta_polar) * 0.1  # 限制在±0.1范围内
+        #         refined_polar = self._cartesian_to_polar(base_pos) + delta_polar
+                
+        #         # 重新应用约束
+        #         refined_pos = self._polar_to_constrained_cartesian(refined_polar) ## 应用约束转换为直角坐标
+        #         refined_positions.append(refined_pos)
+            
+        #     all_positions = refined_positions
+        # else:
+        #     all_positions = base_positions #[]
         
-        # 编队选择分数
-        # 这个是从神经网络得到的分数，并不是计算的评估分数
-        formation_scores = self.formation_selector(encoded) # 这个只是控制图的分数 [batch_size, num_graphs]
+        # # 编队选择分数
+        # # 这个是从神经网络得到的分数，并不是计算的评估分数
+        # formation_scores = self.formation_selector(encoded) # 这个只是控制图的分数 [batch_size, num_graphs]
         
-        # 堆叠所有位置配置 
-        positions_tensor = torch.stack(all_positions, dim=1) # [batch_size, num_graphs, num_followers, 2]
+        # # 堆叠所有位置配置 
+        # positions_tensor = torch.stack(all_positions, dim=1) # [batch_size, num_graphs, num_followers, 2]
         
         # 添加领航者位置 (0, 0)
-        leader_positions = torch.zeros(batch_size, self.num_graphs, 1, 2, device=x.device)
-        full_positions = torch.cat([leader_positions, positions_tensor], dim=2)
+        # leader_positions = torch.zeros(batch_size, self.num_graphs, 1, 2, device=x.device)
+        # full_positions = torch.cat([leader_positions, positions_tensor], dim=2)
         
-        return full_positions, formation_scores
+        return full_positions, scores_tensor
     
+    def _adj_matrix_to_edge_index(self, adj_matrix):
+        """将邻接矩阵转换为edge_index格式
+
+           把 0/1 矩阵变成 ‘source→target’ 两行坐标
+        """
+        edge_list = []
+        n = adj_matrix.size(0)
+        for i in range(n):
+            for j in range(n):
+                if adj_matrix[i, j] > 0:  # 有连接
+                    edge_list.append([i, j])
+        return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+    
+    def _batch_edge_index(self, edge_index, num_nodes, batch_size):
+        """为批次处理扩展边索引
+        
+           给每张图的边编号加上偏移，拼成一批大图，实现 GNN 的批量并行
+        """
+        edge_indices = []
+        for b in range(batch_size):
+            offset = b * num_nodes
+            edges = edge_index + offset
+            edge_indices.append(edges)
+        return torch.cat(edge_indices, dim=1)
+
     def _polar_to_constrained_cartesian(self, polar_params):
         """
         将极坐标参数转换为带约束的直角坐标
