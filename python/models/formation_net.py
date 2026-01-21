@@ -48,11 +48,11 @@ class ConstrainedFormationNet(nn.Module):
             GATConv(64, 64, heads=2, concat=False)
         ])
         
-        # 3. 位置生成器（单个，但接受图类型作为输入）
+        # 3. 位置生成器（连续Actor）
         self.position_generator = nn.Sequential(
-            nn.Linear(64, 128),
+            nn.Linear(64, 32),  # GNN输出的节点特征
             nn.ReLU(),
-            nn.Linear(128, 2)  # 每个机器人输出2D位置
+            nn.Linear(32, 2)    # 每个机器人的2D位置
         )
         
         # 4. 图结构编码器（将控制图编码为特征向量）
@@ -65,16 +65,29 @@ class ConstrainedFormationNet(nn.Module):
             nn.Linear(64, 16)  # 16维图特征
         )
         
-        # 5. 编队选择器（动态处理不同数量的图）
+        # 5. 编队选择器（离散Actor）
         # 不再输出固定数量的分数，而是通过图匹配计算分数
-        self.formation_scorer = nn.Sequential(
-            nn.Linear(64 + 16, 32),  # 节点特征 + 图特征
+        self.graph_scorer = nn.Sequential(
+            nn.Linear(32 + 16, 64),  # 环境特征 + 图特征
             nn.ReLU(),
-            nn.Linear(32, 1)  # 单个分数
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)  # 输出单个图的分数
         )
         
         # 6. 机器人ID嵌入
         self.robot_embedding = nn.Embedding(10, 4)
+
+        self.position_log_std = nn.Parameter(torch.zeros(1, 2))
+
+        # 评估当前状态的价值（Critic） 
+        self.critic = nn.Sequential(
+            nn.Linear(32 + 16, 64),  # 环境特征 + 平均图特征
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)  # 状态价值
+        )
         
         # # 位置生成分支 - 为每个控制图生成跟随者位置
         # self.position_generators = nn.ModuleList([
@@ -113,106 +126,212 @@ class ConstrainedFormationNet(nn.Module):
                             不同机器人数量对应的图数量不同
         """
         batch_size = env_features.size(0) # 获取批量大小
+        num_graphs = len(candidate_graphs) # 获取控制图数量
+
         #print("batch_size:", batch_size)
         
         # 特征编码
-        env_encoded = self.encoder(env_features) # [batch_size, 32]
+        env_features = self.encoder(env_features) # [batch_size, 32]
 
-        all_results = []
-        all_scores = []
+        graph_features_list = [] 
+        for graph in candidate_graphs:
+            # 将图填充到最大尺寸
+            pad_size = (0, 10 - robot_count,
+                       0, 10 - robot_count)
+            graph_padded = F.pad(graph, pad_size, mode='constant', value=0)
+            
+            # 编码图结构
+            graph_flat = graph_padded.flatten().unsqueeze(0)  # [1, max_robots²]
+            graph_feat = self.graph_encoder(graph_flat)  # [1, 16]
+            graph_features_list.append(graph_feat) # [num_graphs, 16]
+
+        # 堆叠所有图特征 [num_graphs, 16]
+        all_graph_features = torch.cat(graph_features_list, dim=0)
+        # 扩展环境特征到每个图
+        env_expanded = env_features.unsqueeze(1)  # [batch, 1, 32]
+        env_expanded = env_expanded.expand(-1, num_graphs, -1)  # [batch, num_graphs, 32]
         
-        # 2. 对每个候选控制图单独处理
-        for graph_idx, adj_matrix in enumerate(candidate_graphs):
-            # adj_matrix: [robot_count, robot_count]
+        # 扩展图特征到每个batch
+        graph_expanded = all_graph_features.unsqueeze(0)  # [1, num_graphs, 16]
+        graph_expanded = graph_expanded.expand(batch_size, -1, -1)  # [batch, num_graphs, 16]
+        
+        # 拼接特征并计算分数
+        combined = torch.cat([env_expanded, graph_expanded], dim=-1)  # [batch, num_graphs, 48]
 
-            pad_size = (0, 10 - robot_count, 0, 10 - robot_count)  # (左,右,上,下)
-            adj_matrix_padded = torch.nn.functional.pad(adj_matrix, pad_size, mode='constant', value=0).to(env_features.device)
+        # 重塑为 [batch * num_graphs, 48] 以便批量处理
+        combined_flat = combined.view(-1, 48)
+        scores_flat = self.graph_scorer(combined_flat)  # [batch * num_graphs, 1]
+        
+        # 恢复形状
+        graph_scores = scores_flat.view(batch_size, num_graphs)  # [batch, num_graphs]
+
+        # 为每个候选图生成位置分布
+        position_dists = []
+        
+        # 预计算机器人ID嵌入
+        robot_emb = self.robot_embedding(robot_ids)  # [batch * robot_count, 4]
+        
+        # 预计算扩展的环境特征（每个机器人一份）
+        env_per_robot = env_features.repeat_interleave(robot_count, dim=0)  # [batch * robot_count, 32]
+
+        # 对每个候选图独立处理
+        for i, graph in enumerate(candidate_graphs):
+            # 获取当前图的特征
+            graph_feat = all_graph_features[i]  # [16]
+            graph_feat_per_robot = graph_feat.unsqueeze(0).expand(batch_size * robot_count, -1)  # [batch * robot_count, 16]
             
-            # 2.1 编码图结构
-            graph_flat = adj_matrix_padded.flatten().unsqueeze(0).repeat(batch_size, 1).to(env_features.device)  # flatten：把 2D 邻接矩阵拉成 1D 向量，unsqueeze：在第 0 维添加一个维度，repeat：复制 batch_size 次
-            graph_feat = self.graph_encoder(graph_flat)  # [batch_size, 16]
+            # 构建GNN输入
+            gnn_input = torch.cat([
+                robot_emb,           # [batch * robot_count, 4]
+                env_per_robot,       # [batch * robot_count, 32]
+                graph_feat_per_robot # [batch * robot_count, 16]
+            ], dim=1)  # [batch * robot_count, 52]
             
-            # 2.2 构建机器人节点特征
-            node_features_list = []
-            for robot_idx in range(robot_count):
-                # 机器人ID特征
-                robot_id_feat = self.robot_embedding(
-                    torch.tensor([robot_idx], device=env_features.device)
-                ).expand(batch_size, -1)  # [batch_size, 4]
-                
-                # 合并：机器人ID + 环境特征 + 图特征
-                node_feat = torch.cat([
-                    robot_id_feat,  # [batch_size, 4]
-                    env_encoded,    # [batch_size, 32]
-                    graph_feat      # [batch_size, 16]
-                ], dim=1)  # [batch_size, 52]
-                
-                node_features_list.append(node_feat)
-            
-            node_features = torch.stack(node_features_list, dim=1)  # [batch_size, robot_count, 52]
-            
-            # 2.3 构建图边
-            edge_index = self._adj_matrix_to_edge_index(adj_matrix).to(env_features.device)
-            edge_index_batch = self._batch_edge_index(edge_index, robot_count, batch_size)
-            
-            # 2.4 GNN处理（PyG 的 GAT 层只认这种“节点×特征”格式）
-            node_features_flat = node_features.view(-1, 52)  # [batch_size * robot_count, 52]把三维张量拍成二维，不拷贝数据，只换视图，方便后续层处理。
+            # GNN处理
+            edge_index = self._create_edges(batch_size, robot_count, graph)
+            x = gnn_input
             
             for gnn_layer in self.gnn_layers:
-                node_features_flat = gnn_layer(node_features_flat, edge_index_batch)
-                node_features_flat = F.relu(node_features_flat) # ReLU 激活函数
+                x = gnn_layer(x, edge_index)
+                x = F.relu(x)
+
+            # 获取跟随者节点的特征（假设领导者是第一个机器人）
+            # 重塑为 [batch, robot_count, 64]
+            x_reshaped = x.view(batch_size, robot_count, -1)
             
-            # 恢复形状
-            node_features_out = node_features_flat.view(batch_size, robot_count, -1)  # [batch_size, robot_count, 64]
+            # 只处理跟随者（索引1到robot_count-1）
+            follower_features = x_reshaped[:, 1:, :]  # [batch, robot_count-1, 64]
             
-            # 2.5 生成位置
-            # 只生成跟随者位置
-            follower_polar_params = []  # 存储极坐标参数
+            # 生成位置均值
+            position_mean = self.position_generator(follower_features)  # [batch, robot_count-1, 2]
+
+            # 创建位置分布
+            position_log_std = self.position_log_std.expand_as(position_mean)
+            position_dist = torch.distributions.Normal(
+                position_mean, 
+                torch.exp(position_log_std)
+            )
+            
+            position_dists.append(position_dist)
+
+        # 计算状态价值（Critic）
+        # 使用平均图特征作为全局图上下文
+        mean_graph_feat = torch.mean(all_graph_features, dim=0, keepdim=True)  # [1, 16]
+        mean_graph_feat = mean_graph_feat.expand(batch_size, -1)  # [batch, 16]
         
-            for follower_idx in range(1, robot_count):
-                follower_feat = node_features_out[:, follower_idx, :]  # [batch_size, 64]
+        value_input = torch.cat([env_features, mean_graph_feat], dim=-1)  # [batch, 48]
+        value = self.critic(value_input)  # [batch, 1]
+        
+        return {
+            'graph_scores': graph_scores,      # [batch, num_graphs] - 用于离散动作选择
+            'position_dists': position_dists,  # 列表，长度num_graphs，每个元素是位置分布
+            'value': value,                    # [batch, 1] - 状态价值
+            'graph_features': all_graph_features  # [num_graphs, 16] - 用于后续计算
+        }
+
+
+
+
+
+
+
+
+
+        # all_results = []
+        # all_scores = []
+        
+        # # 2. 对每个候选控制图单独处理
+        # for graph_idx, adj_matrix in enumerate(candidate_graphs):
+        #     # adj_matrix: [robot_count, robot_count]
+
+        #     pad_size = (0, 10 - robot_count, 0, 10 - robot_count)  # (左,右,上,下)
+        #     adj_matrix_padded = torch.nn.functional.pad(adj_matrix, pad_size, mode='constant', value=0).to(env_features.device)
+            
+        #     # 2.1 编码图结构
+        #     graph_flat = adj_matrix_padded.flatten().unsqueeze(0).repeat(batch_size, 1).to(env_features.device)  # flatten：把 2D 邻接矩阵拉成 1D 向量，unsqueeze：在第 0 维添加一个维度，repeat：复制 batch_size 次
+        #     graph_feat = self.graph_encoder(graph_flat)  # [batch_size, 16]
+            
+        #     # 2.2 构建机器人节点特征
+        #     node_features_list = []
+        #     for robot_idx in range(robot_count):
+        #         # 机器人ID特征
+        #         robot_id_feat = self.robot_embedding(
+        #             torch.tensor([robot_idx], device=env_features.device)
+        #         ).expand(batch_size, -1)  # [batch_size, 4]
                 
-                # 生成极坐标参数，然后通过约束函数转换
-                polar_param = self.position_generator(follower_feat)  # [batch_size, 2]
-                follower_polar_params.append(polar_param)
+        #         # 合并：机器人ID + 环境特征 + 图特征
+        #         node_feat = torch.cat([
+        #             robot_id_feat,  # [batch_size, 4]
+        #             env_encoded,    # [batch_size, 32]
+        #             graph_feat      # [batch_size, 16]
+        #         ], dim=1)  # [batch_size, 52]
+                
+        #         node_features_list.append(node_feat)
             
-            # 将极坐标参数堆叠
-            polar_params_tensor = torch.stack(follower_polar_params, dim=1)  # [batch_size, num_followers, 2]
+        #     node_features = torch.stack(node_features_list, dim=1)  # [batch_size, robot_count, 52]
             
-            # 应用您的极坐标约束转换为直角坐标
-            follower_positions_tensor = self._polar_to_constrained_cartesian(polar_params_tensor)
+        #     # 2.3 构建图边
+        #     edge_index = self._adj_matrix_to_edge_index(adj_matrix).to(env_features.device)
+        #     edge_index_batch = self._batch_edge_index(edge_index, robot_count, batch_size)
             
-            # 2.6 计算编队分数
-            # 全局特征（平均池化）
-            global_feat = torch.mean(node_features_out, dim=1)  # [batch_size, 64]
-            # 与图特征合并
-            score_input = torch.cat([global_feat, graph_feat], dim=1)  # [batch_size, 80]
-            scores = self.formation_scorer(score_input)  # [batch_size, 1]
+        #     # 2.4 GNN处理（PyG 的 GAT 层只认这种“节点×特征”格式）
+        #     node_features_flat = node_features.view(-1, 52)  # [batch_size * robot_count, 52]把三维张量拍成二维，不拷贝数据，只换视图，方便后续层处理。
             
-            all_results.append(follower_positions_tensor) # [batch_size, robot_count, 2]
-            all_scores.append(scores) # [batch_size, 1]
+        #     for gnn_layer in self.gnn_layers:
+        #         node_features_flat = gnn_layer(node_features_flat, edge_index_batch)
+        #         node_features_flat = F.relu(node_features_flat) # ReLU 激活函数
+            
+        #     # 恢复形状
+        #     node_features_out = node_features_flat.view(batch_size, robot_count, -1)  # [batch_size, robot_count, 64]
+            
+        #     # 2.5 生成位置
+        #     # 只生成跟随者位置
+        #     follower_polar_params = []  # 存储极坐标参数
         
-        # 3. 合并结果
-        # 注意：不同候选图可能有不同数量，不能直接stack
-        # 我们需要保持列表形式，或者填充到最大数量
-        if len(candidate_graphs) > 0:
-            # 找到最大机器人数量（通常相同）
-            max_robots_in_batch = robot_count
+        #     for follower_idx in range(1, robot_count):
+        #         follower_feat = node_features_out[:, follower_idx, :]  # [batch_size, 64]
+                
+        #         # 生成极坐标参数，然后通过约束函数转换
+        #         polar_param = self.position_generator(follower_feat)  # [batch_size, 2]
+        #         follower_polar_params.append(polar_param)
             
-            # 将分数堆叠
-            scores_tensor = torch.cat(all_scores, dim=1)  # [batch_size, num_candidate_graphs]
+        #     # 将极坐标参数堆叠
+        #     polar_params_tensor = torch.stack(follower_polar_params, dim=1)  # [batch_size, num_followers, 2]
             
-            # 将位置堆叠
-            follower_positions_stacked = torch.stack(all_results, dim=1)  # [batch_size, num_candidate_graphs, robot_count, 2]
-            # 添加领航者位置 (0, 0)
-            leader_positions = torch.zeros(batch_size, len(candidate_graphs), 1, 2, 
-                                        device=env_features.device)
+        #     # 应用您的极坐标约束转换为直角坐标
+        #     follower_positions_tensor = self._polar_to_constrained_cartesian(polar_params_tensor)
             
-            # 完整位置
-            full_positions = torch.cat([leader_positions, follower_positions_stacked], dim=2)  # [batch_size, num_graphs, robot_count, 2]
-        else:
-            full_positions = torch.zeros(batch_size, 0, robot_count, 2, device=env_features.device)
-            scores_tensor = torch.zeros(batch_size, 0, device=env_features.device)
+        #     # 2.6 计算编队分数
+        #     # 全局特征（平均池化）
+        #     global_feat = torch.mean(node_features_out, dim=1)  # [batch_size, 64]
+        #     # 与图特征合并
+        #     score_input = torch.cat([global_feat, graph_feat], dim=1)  # [batch_size, 80]
+        #     scores = self.formation_scorer(score_input)  # [batch_size, 1]
+            
+        #     all_results.append(follower_positions_tensor) # [batch_size, robot_count, 2]
+        #     all_scores.append(scores) # [batch_size, 1]
+        
+        # # 3. 合并结果
+        # # 注意：不同候选图可能有不同数量，不能直接stack
+        # # 我们需要保持列表形式，或者填充到最大数量
+        # if len(candidate_graphs) > 0:
+        #     # 找到最大机器人数量（通常相同）
+        #     max_robots_in_batch = robot_count
+            
+        #     # 将分数堆叠
+        #     scores_tensor = torch.cat(all_scores, dim=1)  # [batch_size, num_candidate_graphs]
+            
+        #     # 将位置堆叠
+        #     follower_positions_stacked = torch.stack(all_results, dim=1)  # [batch_size, num_candidate_graphs, robot_count, 2]
+        #     # 添加领航者位置 (0, 0)
+        #     leader_positions = torch.zeros(batch_size, len(candidate_graphs), 1, 2, 
+        #                                 device=env_features.device)
+            
+        #     # 完整位置
+        #     full_positions = torch.cat([leader_positions, follower_positions_stacked], dim=2)  # [batch_size, num_graphs, robot_count, 2]
+        # else:
+        #     full_positions = torch.zeros(batch_size, 0, robot_count, 2, device=env_features.device)
+        #     scores_tensor = torch.zeros(batch_size, 0, device=env_features.device)
 
 
 
@@ -261,7 +380,7 @@ class ConstrainedFormationNet(nn.Module):
         # leader_positions = torch.zeros(batch_size, self.num_graphs, 1, 2, device=x.device)
         # full_positions = torch.cat([leader_positions, positions_tensor], dim=2)
         
-        return full_positions, scores_tensor
+        # return full_positions, scores_tensor
     
     def _adj_matrix_to_edge_index(self, adj_matrix):
         """将邻接矩阵转换为edge_index格式
@@ -274,6 +393,29 @@ class ConstrainedFormationNet(nn.Module):
             for j in range(n):
                 if adj_matrix[i, j] > 0:  # 有连接
                     edge_list.append([i, j])
+        return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+    
+    def _create_edges(self, batch_size, robot_count, adj_matrix):
+        """根据邻接矩阵创建边索引，支持批量处理"""
+        edge_list = []
+        
+        # 获取邻接矩阵中的边（非零元素）
+        if isinstance(adj_matrix, torch.Tensor):
+            rows, cols = torch.where(adj_matrix > 0)
+        else:
+            # 如果adj_matrix是numpy数组
+            rows, cols = torch.where(torch.tensor(adj_matrix) > 0)
+        
+        # 为每个batch样本创建边
+        for b in range(batch_size):
+            offset = b * robot_count
+            for i, j in zip(rows, cols):
+                edge_list.append([offset + i.item(), offset + j.item()])
+        
+        if len(edge_list) == 0:
+            # 如果没有边，返回空张量
+            return torch.empty((2, 0), dtype=torch.long, device=adj_matrix.device if hasattr(adj_matrix, 'device') else 'cpu')
+        
         return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
     
     def _batch_edge_index(self, edge_index, num_nodes, batch_size):
