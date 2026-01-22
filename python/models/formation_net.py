@@ -114,7 +114,7 @@ class ConstrainedFormationNet(nn.Module):
             ) for _ in range(num_graphs)
         ])
         
-    def forward(self, env_features, robot_count, candidate_graphs, training_phase="imitation"):
+    def forward(self, features, robot_ids, candidate_graphs, robot_count):
         """
         前向传播
         
@@ -125,13 +125,13 @@ class ConstrainedFormationNet(nn.Module):
             candidate_graphs: 列表，每个元素是一个邻接矩阵 [robot_count, robot_count]
                             不同机器人数量对应的图数量不同
         """
-        batch_size = env_features.size(0) # 获取批量大小
+        batch_size = features.size(0) # 获取批量大小
         num_graphs = len(candidate_graphs) # 获取控制图数量
 
         #print("batch_size:", batch_size)
         
         # 特征编码
-        env_features = self.encoder(env_features) # [batch_size, 32]
+        env_features = self.encoder(features) # [batch_size, 32]
 
         graph_features_list = [] 
         for graph in candidate_graphs:
@@ -155,7 +155,7 @@ class ConstrainedFormationNet(nn.Module):
         graph_expanded = all_graph_features.unsqueeze(0)  # [1, num_graphs, 16]
         graph_expanded = graph_expanded.expand(batch_size, -1, -1)  # [batch, num_graphs, 16]
         
-        # 拼接特征并计算分数
+        # 拼接特征并计算分数（combined包括了环境特征和图特征）
         combined = torch.cat([env_expanded, graph_expanded], dim=-1)  # [batch, num_graphs, 48]
 
         # 重塑为 [batch * num_graphs, 48] 以便批量处理
@@ -169,7 +169,7 @@ class ConstrainedFormationNet(nn.Module):
         position_dists = []
         
         # 预计算机器人ID嵌入
-        robot_emb = self.robot_embedding(robot_ids)  # [batch * robot_count, 4]
+        robot_emb = self.robot_embedding(robot_ids)  # [batch * robot_count, 4] 
         
         # 预计算扩展的环境特征（每个机器人一份）
         env_per_robot = env_features.repeat_interleave(robot_count, dim=0)  # [batch * robot_count, 32]
@@ -201,16 +201,18 @@ class ConstrainedFormationNet(nn.Module):
             
             # 只处理跟随者（索引1到robot_count-1）
             follower_features = x_reshaped[:, 1:, :]  # [batch, robot_count-1, 64]
+
+            # 先处理图消息，在处理位置生成会不会好一点
             
-            # 生成位置均值
+            # 生成位置均值（获取相对位置）
             position_mean = self.position_generator(follower_features)  # [batch, robot_count-1, 2]
 
             # 创建位置分布
             position_log_std = self.position_log_std.expand_as(position_mean)
-            position_dist = torch.distributions.Normal(
+            position_dist = torch.distributions.Normal(   # 正态分布
                 position_mean, 
                 torch.exp(position_log_std)
-            )
+            ) 
             
             position_dists.append(position_dist)
 
@@ -228,159 +230,6 @@ class ConstrainedFormationNet(nn.Module):
             'value': value,                    # [batch, 1] - 状态价值
             'graph_features': all_graph_features  # [num_graphs, 16] - 用于后续计算
         }
-
-
-
-
-
-
-
-
-
-        # all_results = []
-        # all_scores = []
-        
-        # # 2. 对每个候选控制图单独处理
-        # for graph_idx, adj_matrix in enumerate(candidate_graphs):
-        #     # adj_matrix: [robot_count, robot_count]
-
-        #     pad_size = (0, 10 - robot_count, 0, 10 - robot_count)  # (左,右,上,下)
-        #     adj_matrix_padded = torch.nn.functional.pad(adj_matrix, pad_size, mode='constant', value=0).to(env_features.device)
-            
-        #     # 2.1 编码图结构
-        #     graph_flat = adj_matrix_padded.flatten().unsqueeze(0).repeat(batch_size, 1).to(env_features.device)  # flatten：把 2D 邻接矩阵拉成 1D 向量，unsqueeze：在第 0 维添加一个维度，repeat：复制 batch_size 次
-        #     graph_feat = self.graph_encoder(graph_flat)  # [batch_size, 16]
-            
-        #     # 2.2 构建机器人节点特征
-        #     node_features_list = []
-        #     for robot_idx in range(robot_count):
-        #         # 机器人ID特征
-        #         robot_id_feat = self.robot_embedding(
-        #             torch.tensor([robot_idx], device=env_features.device)
-        #         ).expand(batch_size, -1)  # [batch_size, 4]
-                
-        #         # 合并：机器人ID + 环境特征 + 图特征
-        #         node_feat = torch.cat([
-        #             robot_id_feat,  # [batch_size, 4]
-        #             env_encoded,    # [batch_size, 32]
-        #             graph_feat      # [batch_size, 16]
-        #         ], dim=1)  # [batch_size, 52]
-                
-        #         node_features_list.append(node_feat)
-            
-        #     node_features = torch.stack(node_features_list, dim=1)  # [batch_size, robot_count, 52]
-            
-        #     # 2.3 构建图边
-        #     edge_index = self._adj_matrix_to_edge_index(adj_matrix).to(env_features.device)
-        #     edge_index_batch = self._batch_edge_index(edge_index, robot_count, batch_size)
-            
-        #     # 2.4 GNN处理（PyG 的 GAT 层只认这种“节点×特征”格式）
-        #     node_features_flat = node_features.view(-1, 52)  # [batch_size * robot_count, 52]把三维张量拍成二维，不拷贝数据，只换视图，方便后续层处理。
-            
-        #     for gnn_layer in self.gnn_layers:
-        #         node_features_flat = gnn_layer(node_features_flat, edge_index_batch)
-        #         node_features_flat = F.relu(node_features_flat) # ReLU 激活函数
-            
-        #     # 恢复形状
-        #     node_features_out = node_features_flat.view(batch_size, robot_count, -1)  # [batch_size, robot_count, 64]
-            
-        #     # 2.5 生成位置
-        #     # 只生成跟随者位置
-        #     follower_polar_params = []  # 存储极坐标参数
-        
-        #     for follower_idx in range(1, robot_count):
-        #         follower_feat = node_features_out[:, follower_idx, :]  # [batch_size, 64]
-                
-        #         # 生成极坐标参数，然后通过约束函数转换
-        #         polar_param = self.position_generator(follower_feat)  # [batch_size, 2]
-        #         follower_polar_params.append(polar_param)
-            
-        #     # 将极坐标参数堆叠
-        #     polar_params_tensor = torch.stack(follower_polar_params, dim=1)  # [batch_size, num_followers, 2]
-            
-        #     # 应用您的极坐标约束转换为直角坐标
-        #     follower_positions_tensor = self._polar_to_constrained_cartesian(polar_params_tensor)
-            
-        #     # 2.6 计算编队分数
-        #     # 全局特征（平均池化）
-        #     global_feat = torch.mean(node_features_out, dim=1)  # [batch_size, 64]
-        #     # 与图特征合并
-        #     score_input = torch.cat([global_feat, graph_feat], dim=1)  # [batch_size, 80]
-        #     scores = self.formation_scorer(score_input)  # [batch_size, 1]
-            
-        #     all_results.append(follower_positions_tensor) # [batch_size, robot_count, 2]
-        #     all_scores.append(scores) # [batch_size, 1]
-        
-        # # 3. 合并结果
-        # # 注意：不同候选图可能有不同数量，不能直接stack
-        # # 我们需要保持列表形式，或者填充到最大数量
-        # if len(candidate_graphs) > 0:
-        #     # 找到最大机器人数量（通常相同）
-        #     max_robots_in_batch = robot_count
-            
-        #     # 将分数堆叠
-        #     scores_tensor = torch.cat(all_scores, dim=1)  # [batch_size, num_candidate_graphs]
-            
-        #     # 将位置堆叠
-        #     follower_positions_stacked = torch.stack(all_results, dim=1)  # [batch_size, num_candidate_graphs, robot_count, 2]
-        #     # 添加领航者位置 (0, 0)
-        #     leader_positions = torch.zeros(batch_size, len(candidate_graphs), 1, 2, 
-        #                                 device=env_features.device)
-            
-        #     # 完整位置
-        #     full_positions = torch.cat([leader_positions, follower_positions_stacked], dim=2)  # [batch_size, num_graphs, robot_count, 2]
-        # else:
-        #     full_positions = torch.zeros(batch_size, 0, robot_count, 2, device=env_features.device)
-        #     scores_tensor = torch.zeros(batch_size, 0, device=env_features.device)
-
-
-
-
-
-
-        # # 基础位置生成
-        # base_positions = []
-        # for i, generator in enumerate(self.position_generators):
-        #     # 通过神经网络生成极坐标参数 [batch_size, num_followers, 2]
-        #     polar_params = generator(encoded).view(batch_size, self.num_followers, 2)
-            
-        #     # 应用约束转换为直角坐标
-        #     positions = self._polar_to_constrained_cartesian(polar_params) # [batch_size, num_followers, 2]
-        #     base_positions.append(positions) # [num_graphs, batch_size, num_followers, 2]
-
-        # # 根据训练阶段决定是否使用微调
-        # if training_phase == "rl_finetune":
-        #     refined_positions = []
-        #     for i, (base_pos, refiner) in enumerate(zip(base_positions, self.position_refiners)):
-        #         # 将基础位置和编码特征结合进行微调
-        #         # refiner_input是[batch_size, 32 + num_followers*2]
-        #         refiner_input = torch.cat([encoded, base_pos.view(batch_size, -1)], dim=1) # base_pos.view(batch_size, -1)是[batch_size, num_followers*2]
-        #         delta_polar = refiner(refiner_input).view(batch_size, self.num_followers, 2) # [batch_size, num_followers, 2]
-                
-        #         # 应用小幅度调整（限制调整幅度）
-        #         delta_polar = torch.tanh(delta_polar) * 0.1  # 限制在±0.1范围内
-        #         refined_polar = self._cartesian_to_polar(base_pos) + delta_polar
-                
-        #         # 重新应用约束
-        #         refined_pos = self._polar_to_constrained_cartesian(refined_polar) ## 应用约束转换为直角坐标
-        #         refined_positions.append(refined_pos)
-            
-        #     all_positions = refined_positions
-        # else:
-        #     all_positions = base_positions #[]
-        
-        # # 编队选择分数
-        # # 这个是从神经网络得到的分数，并不是计算的评估分数
-        # formation_scores = self.formation_selector(encoded) # 这个只是控制图的分数 [batch_size, num_graphs]
-        
-        # # 堆叠所有位置配置 
-        # positions_tensor = torch.stack(all_positions, dim=1) # [batch_size, num_graphs, num_followers, 2]
-        
-        # 添加领航者位置 (0, 0)
-        # leader_positions = torch.zeros(batch_size, self.num_graphs, 1, 2, device=x.device)
-        # full_positions = torch.cat([leader_positions, positions_tensor], dim=2)
-        
-        # return full_positions, scores_tensor
     
     def _adj_matrix_to_edge_index(self, adj_matrix):
         """将邻接矩阵转换为edge_index格式
@@ -478,103 +327,115 @@ class ConstrainedFormationNet(nn.Module):
         
         return torch.stack([distance_param, angle_param], dim=-1)
 
-class HybridLoss(nn.Module):
-    """
-    混合损失函数：结合模仿学习和强化学习
-    """
+class SimplifiedPPOLoss(nn.Module):
+    def __init__(self, clip_epsilon=0.2, value_coef=0.5, entropy_coef=0.01):
+        super().__init__()
+        self.clip_epsilon = clip_epsilon
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
     
-    def __init__(self, imitation_weight=0.7, rl_weight=0.3, diversity_weight=0.1, control_graphs=None):
-        super(HybridLoss, self).__init__()
-        self.imitation_weight = imitation_weight
-        self.rl_weight = rl_weight
-        self.diversity_weight = diversity_weight
-        self.control_graphs = control_graphs
-        
-        self.mse_loss = nn.MSELoss() # 均方误差损失（预测位置与专家位置的差异）连续
-        self.ce_loss = nn.CrossEntropyLoss() # 交叉熵损失（预测编队分数与专家选择的差异）离散
-    
-    def forward(self, pred_positions, pred_scores, expert_positions, 
-                expert_graph, advantages, has_expert_mask):
+    def forward(self, new_outputs, old_outputs, actions, advantages, returns):
         """
-        计算混合损失
+        计算PPO损失
         
         Args:
-            pred_positions: 预测的位置 [batch_size, num_graphs, num_robots, 2]
-            pred_scores: 预测的编队分数 [batch_size, num_graphs]
-            expert_positions: 专家位置 [batch_size, num_robots, 2]
-            expert_graph: 专家选择的编队控制图 shape [batch_size, num_robots, num_robots]
-            control_graphs: 控制图列表 shape (num_graphs, num_robots, num_robots)
-            expert_graph_idx: 专家选择的编队索引 [batch_size]
-            advantages: 优势函数 [batch_size, num_graphs]
-            has_expert_mask: 是否有专家标注 [batch_size]
+            new_outputs: 新策略的输出
+            old_outputs: 旧策略的输出（结构相同）
+            actions: 包含图索引和位置的动作
+                graph_idx: [batch] 选择的图索引
+                position: [batch, robot_count-1, 2] 选择的位置
+            advantages: [batch] 优势函数（动作比当前状态的平均水平好多少）
+            returns: [batch] 回报
         """
-        batch_size = pred_positions.size(0)
-
-        # 获取专家选择的控制图索引
-        expert_graph_idx = torch.full((batch_size,), -1, dtype=torch.long, device=pred_positions.device)
+        batch_size = actions['graph_idx'].size(0)
+        
+        # 1. 离散动作损失（图选择）
+        # 获取新旧策略的图选择概率
+        new_graph_logits = new_outputs['graph_scores']
+        old_graph_logits = old_outputs['graph_scores']
+        
+        # 转换为概率分布
+        new_graph_probs = F.softmax(new_graph_logits, dim=-1)
+        old_graph_probs = F.softmax(old_graph_logits, dim=-1)
+        
+        # 获取选择动作的概率（从概率表中精准找出对应图的概率值）
+        new_graph_log_probs = torch.log(new_graph_probs.gather(1, actions['graph_idx'].unsqueeze(1))).squeeze(1) #新策略下，“选中该图” 的对数概率
+        old_graph_log_probs = torch.log(old_graph_probs.gather(1, actions['graph_idx'].unsqueeze(1))).squeeze(1) #旧策略下，“选中该图” 的对数概率
+        
+        # 计算比率和PPO clip损失
+        ratio_graph = torch.exp(new_graph_log_probs - old_graph_log_probs)
+        graph_surr1 = ratio_graph * advantages
+        graph_surr2 = torch.clamp(ratio_graph, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
+        graph_loss = -torch.min(graph_surr1, graph_surr2).mean()
+        
+        # 2. 连续动作损失（位置生成）
+        position_loss = 0
+        ratio_position_list = []
+        
+        # 对每个样本单独处理
         for i in range(batch_size):
-            for j in range(self.control_graphs.shape[0]):
-                if torch.equal(expert_graph[i], self.control_graphs[j]):
-                    expert_graph_idx[i] = j
-                    break
-
-        # print("control_graphs:", self.control_graphs)  
-        # print("expert_graph:", expert_graph)
-        # print("expert_graph_idx:", expert_graph_idx)
-        
-        
-        # 1. 模仿学习损失（仅对有专家标注的样本）
-        imitation_loss = torch.tensor(0.0, device=pred_positions.device, requires_grad=False)
-        if has_expert_mask.any():
-            # 位置损失
-            pred_expert_positions = pred_positions[has_expert_mask, expert_graph_idx[has_expert_mask]]
-
-            # print("pred_expert_positions:", pred_expert_positions)
-            # print("expert_positions:", expert_positions[has_expert_mask])
-            # print("has_expert_mask:", has_expert_mask)
-            # print("expert_positions:", expert_positions)
-            # # print("has_expert_mask 数据类型：", has_expert_mask.dtype)
-            # sys.exit("stop here")
-            position_loss = self.mse_loss(pred_expert_positions, expert_positions[has_expert_mask])
+            graph_idx = actions['graph_idx'][i].item()
             
-            # 分类损失（控制图选择）
-            classification_loss = self.ce_loss(pred_scores[has_expert_mask], expert_graph_idx[has_expert_mask])
-            # print("pred_scores:", pred_scores[has_expert_mask])
-            # print("expert_graph_idx:", expert_graph_idx[has_expert_mask])
+            # 获取该图对应的位置分布
+            new_position_dist = new_outputs['position_dists'][graph_idx]
+            old_position_dist = old_outputs['position_dists'][graph_idx]
             
-
-            # print(position_loss, classification_loss)
-            # sys.exit("stop here")
-
-            imitation_loss = position_loss + classification_loss
+            # 获取该样本的位置动作
+            sample_position = actions['position'][i:i+1]  # [1, robot_count-1, 2]
+            
+            # 计算新旧策略下该位置的对数概率
+            new_position_log_prob = new_position_dist.log_prob(sample_position).sum(dim=[1, 2])
+            old_position_log_prob = old_position_dist.log_prob(sample_position).sum(dim=[1, 2])
+            
+            # 计算比率
+            ratio_position = torch.exp(new_position_log_prob - old_position_log_prob)
+            ratio_position_list.append(ratio_position)
+            
+            # PPO clip损失
+            position_surr1 = ratio_position * advantages[i]
+            position_surr2 = torch.clamp(ratio_position, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages[i]
+            position_loss = position_loss - torch.min(position_surr1, position_surr2)
         
-        # 2. 强化学习损失（对所有样本）但是这个pred_scores指的是控制图的分数，不是位置
-        # 目前由于位置是连续的，所以强化学习损失只作用于控制图选择上，之后可以尝试一下用其他强化学习方法来优化位置（比如PPO）
-        # print("advantages:", advantages)
-        # print("pred_scores:", pred_scores)
-        # sys.exit("stop here")
-        log_probs = F.log_softmax(pred_scores, dim=1) # 获取对数概率
-        rl_loss = -torch.mean(log_probs * advantages) # advantages代表了奖励
+        position_loss = position_loss / batch_size
         
-        # 3. 多样性损失（鼓励不同控制图生成不同的位置）
-        diversity_loss = self._compute_diversity_loss(pred_positions)
-
-        # self.rl_weight = 0.0
-        # self.diversity_weight = 0.0
+        # 3. 价值损失
+        value = new_outputs['value'].squeeze(-1)
+        value_loss = F.mse_loss(value, returns)
         
-        # 加权组合
-        total_loss = (self.imitation_weight * imitation_loss + 
-                     self.rl_weight * rl_loss + 
-                     self.diversity_weight * diversity_loss)
+        # 4. 熵正则化
+        # 图选择的熵（鼓励探索）
+        graph_entropy = -(new_graph_probs * torch.log(new_graph_probs + 1e-8)).sum(dim=-1).mean()
         
-        # print("total_loss, imitation_loss, rl_loss, diversity_loss", total_loss, imitation_loss, rl_loss, diversity_loss)
+        # 位置生成的熵（所有位置分布的平均熵）
+        position_entropy = 0
+        for dist in new_outputs['position_dists']:
+            position_entropy += dist.entropy().mean()
+        position_entropy = position_entropy / len(new_outputs['position_dists'])
         
-        return total_loss, {
-            'imitation_loss': imitation_loss,
-            'rl_loss': rl_loss,
-            'diversity_loss': diversity_loss,
-            'total_loss': total_loss
+        entropy_bonus = graph_entropy + position_entropy
+        
+        # 5. 总损失
+        total_loss = (
+            graph_loss + 
+            position_loss + 
+            self.value_coef * value_loss - 
+            self.entropy_coef * entropy_bonus
+        )
+        
+        # 记录各项损失
+        losses_dict = {
+            'total_loss': total_loss.item(),
+            'graph_loss': graph_loss.item(),
+            'position_loss': position_loss.item(),
+            'value_loss': value_loss.item(),
+            'graph_entropy': graph_entropy.item(),
+            'position_entropy': position_entropy.item(),
+            'graph_ratio_mean': ratio_graph.mean().item(),
+            'position_ratio_mean': torch.mean(torch.stack(ratio_position_list)).item() if ratio_position_list else 0
         }
+        
+        return total_loss, losses_dict
+
     
     def _compute_diversity_loss(self, positions):
         """计算位置配置的多样性损失"""
