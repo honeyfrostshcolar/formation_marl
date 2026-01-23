@@ -1,3 +1,4 @@
+from python.models.formation_net import SimplifiedPPOLoss
 import torch
 import torch.optim as optim
 import numpy as np
@@ -6,6 +7,8 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import formation_core 
+import copy
+import torch.nn.functional as F
 
 
 class SimplifiedPPOTrainer:
