@@ -43,7 +43,7 @@ class ConstrainedFormationNet(nn.Module):
 
         # 2. GNN层（处理可变节点数）
         self.gnn_layers = nn.ModuleList([
-            GATConv(4 + 32 + 16, 64, heads=2, concat=False),  # 输入: 4(机器人) + 32(环境) + 16(图结构) = 52
+            GATConv(4 + 32 + 16, 64, heads=2, concat=False),  # 输入: 4(机器人编码) + 32(环境) + 16(图结构) = 52
             GATConv(64, 64, heads=2, concat=False),
             GATConv(64, 64, heads=2, concat=False)
         ])
@@ -76,7 +76,7 @@ class ConstrainedFormationNet(nn.Module):
         )
         
         # 6. 机器人ID嵌入
-        self.robot_embedding = nn.Embedding(10, 4)
+        self.robot_embedding = nn.Embedding(10, 4) # 机器人ID（最多为10个）嵌入为4维向量
 
         self.position_log_std = nn.Parameter(torch.zeros(1, 2))
 
@@ -89,30 +89,14 @@ class ConstrainedFormationNet(nn.Module):
             nn.Linear(32, 1)  # 状态价值
         )
         
-        # # 位置生成分支 - 为每个控制图生成跟随者位置
-        # self.position_generators = nn.ModuleList([
+        # 位置微调模块（用于后期强化学习微调）
+        # self.position_refiners = nn.ModuleList([
         #     nn.Sequential(
-        #         nn.Linear(32, 64),
+        #         nn.Linear(32 + 2 * self.num_followers, 32),
         #         nn.ReLU(),
-        #         nn.Linear(64, 2 * self.num_followers)  # 输出极坐标参数
+        #         nn.Linear(32, 2 * self.num_followers)
         #     ) for _ in range(num_graphs)
         # ])
-        
-        # # 编队选择分支
-        # self.formation_selector = nn.Sequential(
-        #     nn.Linear(32, 16),
-        #     nn.ReLU(),
-        #     nn.Linear(16, num_graphs)
-        # )
-        
-        # 位置微调模块（用于后期强化学习微调）
-        self.position_refiners = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(32 + 2 * self.num_followers, 32),
-                nn.ReLU(),
-                nn.Linear(32, 2 * self.num_followers)
-            ) for _ in range(num_graphs)
-        ])
         
     def forward(self, features, robot_ids, candidate_graphs, robot_count):
         """
@@ -169,6 +153,7 @@ class ConstrainedFormationNet(nn.Module):
         position_dists = []
         
         # 预计算机器人ID嵌入
+        # follower_robot_ids = robot_ids[1:]
         robot_emb = self.robot_embedding(robot_ids)  # [batch * robot_count, 4] 
         
         # 预计算扩展的环境特征（每个机器人一份）
@@ -178,14 +163,14 @@ class ConstrainedFormationNet(nn.Module):
         for i, graph in enumerate(candidate_graphs):
             # 获取当前图的特征
             graph_feat = all_graph_features[i]  # [16]
-            graph_feat_per_robot = graph_feat.unsqueeze(0).expand(batch_size * robot_count, -1)  # [batch * robot_count, 16]
+            graph_feat_per_robot = graph_feat.unsqueeze(0).expand(batch_size * robot_count, -1)  # [batch * (robot_count), 16]
             
             # 构建GNN输入
             gnn_input = torch.cat([
-                robot_emb,           # [batch * robot_count, 4]
-                env_per_robot,       # [batch * robot_count, 32]
-                graph_feat_per_robot # [batch * robot_count, 16]
-            ], dim=1)  # [batch * robot_count, 52]
+                robot_emb,           # [batch * (robot_count), 4]
+                env_per_robot,       # [batch * (robot_count), 32]
+                graph_feat_per_robot # [batch * (robot_count), 16]
+            ], dim=1)  # [batch * (robot_count), 52]
             
             # GNN处理
             edge_index = self._create_edges(batch_size, robot_count, graph)
