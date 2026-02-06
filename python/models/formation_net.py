@@ -104,7 +104,6 @@ class ConstrainedFormationNet(nn.Module):
         
         Args:
             env_features: 环境特征 [batch_size, feature_dim]
-            training_phase: 训练阶段 ("imitation", "mixed", "rl_finetune")
             robot_count: 整数，机器人数量
             candidate_graphs: 列表，每个元素是一个邻接矩阵 [robot_count, robot_count]
                             不同机器人数量对应的图数量不同
@@ -208,6 +207,8 @@ class ConstrainedFormationNet(nn.Module):
         
         value_input = torch.cat([env_features, mean_graph_feat], dim=-1)  # [batch, 48]
         value = self.critic(value_input)  # [batch, 1]
+
+        # 这里应该是缺东西，没有把模型获得的图分数放进model_output中
         
         return {
             'graph_scores': graph_scores,      # [batch, num_graphs] - 用于离散动作选择
@@ -311,146 +312,3 @@ class ConstrainedFormationNet(nn.Module):
         angle_param = torch.logit(angle_param.clamp(1e-6, 1-1e-6))
         
         return torch.stack([distance_param, angle_param], dim=-1)
-
-class SimplifiedPPOLoss(nn.Module):
-    def __init__(self, clip_epsilon=0.2, value_coef=0.5, entropy_coef=0.01):
-        super().__init__()
-        self.clip_epsilon = clip_epsilon
-        self.value_coef = value_coef
-        self.entropy_coef = entropy_coef
-    
-    def forward(self, new_outputs, old_outputs, actions, advantages, returns):
-        """
-        计算PPO损失
-        
-        Args:
-            new_outputs: 新策略的输出
-            old_outputs: 旧策略的输出（结构相同）
-            actions: 包含图索引和位置的动作
-                graph_idx: [batch] 选择的图索引
-                position: [batch, robot_count-1, 2] 选择的位置
-            advantages: [batch] 优势函数（动作比当前状态的平均水平好多少）
-            returns: [batch] 回报
-        """
-        batch_size = actions['graph_idx'].size(0)
-        
-        # 1. 离散动作损失（图选择）
-        # 获取新旧策略的图选择概率
-        new_graph_logits = new_outputs['graph_scores']
-        old_graph_logits = old_outputs['graph_scores']
-        
-        # 转换为概率分布
-        new_graph_probs = F.softmax(new_graph_logits, dim=-1)
-        old_graph_probs = F.softmax(old_graph_logits, dim=-1)
-        
-        # 获取选择动作的概率（从概率表中精准找出对应图的概率值）
-        new_graph_log_probs = torch.log(new_graph_probs.gather(1, actions['graph_idx'].unsqueeze(1))).squeeze(1) #新策略下，“选中该图” 的对数概率
-        old_graph_log_probs = torch.log(old_graph_probs.gather(1, actions['graph_idx'].unsqueeze(1))).squeeze(1) #旧策略下，“选中该图” 的对数概率
-        
-        # 计算比率和PPO clip损失
-        ratio_graph = torch.exp(new_graph_log_probs - old_graph_log_probs)
-        graph_surr1 = ratio_graph * advantages
-        graph_surr2 = torch.clamp(ratio_graph, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
-        graph_loss = -torch.min(graph_surr1, graph_surr2).mean()
-        
-        # 2. 连续动作损失（位置生成）
-        position_loss = 0
-        ratio_position_list = []
-        
-        # 对每个样本单独处理
-        for i in range(batch_size):
-            graph_idx = actions['graph_idx'][i].item()
-            
-            # 获取该图对应的位置分布
-            new_position_dist = new_outputs['position_dists'][graph_idx]
-            old_position_dist = old_outputs['position_dists'][graph_idx]
-            
-            # 获取该样本的位置动作
-            sample_position = actions['position'][i:i+1]  # [1, robot_count-1, 2]
-            
-            # 计算新旧策略下该位置的对数概率
-            new_position_log_prob = new_position_dist.log_prob(sample_position).sum(dim=[1, 2])
-            old_position_log_prob = old_position_dist.log_prob(sample_position).sum(dim=[1, 2])
-            
-            # 计算比率
-            ratio_position = torch.exp(new_position_log_prob - old_position_log_prob)
-            ratio_position_list.append(ratio_position)
-            
-            # PPO clip损失
-            position_surr1 = ratio_position * advantages[i]
-            position_surr2 = torch.clamp(ratio_position, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages[i]
-            position_loss = position_loss - torch.min(position_surr1, position_surr2)
-        
-        position_loss = position_loss / batch_size
-        
-        # 3. 价值损失
-        value = new_outputs['value'].squeeze(-1)
-        value_loss = F.mse_loss(value, returns)
-        
-        # 4. 熵正则化
-        # 图选择的熵（鼓励探索）
-        graph_entropy = -(new_graph_probs * torch.log(new_graph_probs + 1e-8)).sum(dim=-1).mean()
-        
-        # 位置生成的熵（所有位置分布的平均熵）
-        position_entropy = 0
-        for dist in new_outputs['position_dists']:
-            position_entropy += dist.entropy().mean()
-        position_entropy = position_entropy / len(new_outputs['position_dists'])
-        
-        entropy_bonus = graph_entropy + position_entropy
-        
-        # 5. 总损失
-        total_loss = (
-            graph_loss + 
-            position_loss + 
-            self.value_coef * value_loss - 
-            self.entropy_coef * entropy_bonus
-        )
-        
-        # 记录各项损失
-        losses_dict = {
-            'total_loss': total_loss.item(),
-            'graph_loss': graph_loss.item(),
-            'position_loss': position_loss.item(),
-            'value_loss': value_loss.item(),
-            'graph_entropy': graph_entropy.item(),
-            'position_entropy': position_entropy.item(),
-            'graph_ratio_mean': ratio_graph.mean().item(),
-            'position_ratio_mean': torch.mean(torch.stack(ratio_position_list)).item() if ratio_position_list else 0
-        }
-        
-        return total_loss, losses_dict
-
-    
-    def _compute_diversity_loss(self, positions):
-        """计算位置配置的多样性损失"""
-        batch_size, num_graphs, num_robots, _ = positions.shape
-        
-        if num_graphs < 2:
-            return torch.tensor(0.0, device=positions.device)
-        
-        total_distance = 0.0
-        count = 0
-        
-        # 计算所有控制图对之间的平均距离
-        for i in range(num_graphs):
-            for j in range(i + 1, num_graphs):
-                pos_i = positions[:, i]  # [batch_size, num_robots, 2]
-                pos_j = positions[:, j]
-                
-                # 计算平均位置差异
-                diff = pos_i - pos_j
-                distance = torch.mean(torch.norm(diff, dim=2))
-                total_distance += distance
-                count += 1
-        
-        if count == 0:
-            return torch.tensor(0.0, device=positions.device)
-        
-        avg_distance = total_distance / count
-        
-        # 我们希望平均距离不要太接近0（即不要所有控制图都生成相似的位置）
-        # 因为模型的优化逻辑是 “最小化总损失”，所以损失函数必须满足：avg_distance 与损失值呈 “负相关”
-        diversity_loss = -torch.log(avg_distance + 1e-8)
-        
-        return diversity_loss

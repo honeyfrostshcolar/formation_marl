@@ -9,6 +9,7 @@ from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
 from envs.formation_pybullet_env import FormationPyBulletEnv
 from models.formation_net_rllib import ConstrainedFormationNetRLLib
+from policies.formation_policy import CustomFormationPolicy
 
 def main():
 
@@ -62,6 +63,11 @@ def main():
                 "max_robots": 10,
                 "control_graphs": control_graphs_np
             }
+        )
+        .policy(
+            "custom_policy",
+            CustomFormationPolicy,
+            {},
         )
         .rollouts(
             num_rollout_workers=4,

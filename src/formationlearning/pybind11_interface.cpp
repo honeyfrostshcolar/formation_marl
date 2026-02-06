@@ -41,6 +41,23 @@ PYBIND11_MODULE(formation_core, m) {
         .def_readwrite("control_graph", &FormationConfig::controlGraph)
         .def_readwrite("positions", &FormationConfig::positions); 
 
+    py::class_<EnvironmentFeatures>(m, "EnvironmentFeatures") //绑定EnvironmentFeatures结构体
+        .def(py::init<>())
+        .def_readwrite("corridor_width", &EnvironmentFeatures::corridor_width)
+        .def_readwrite("front_clearance", &EnvironmentFeatures::front_clearance)
+        .def_readwrite("left_clearance", &EnvironmentFeatures::left_clearance)
+        .def_readwrite("right_clearance", &EnvironmentFeatures::right_clearance)
+        .def_readwrite("obstacle_density", &EnvironmentFeatures::obstacle_density)
+        .def_readwrite("sector_min_dists", &EnvironmentFeatures::sector_min_dists)
+        .def_readwrite("sector_avg_dists", &EnvironmentFeatures::sector_avg_dists);
+
+    py::class_<LidarData>(m, "LidarData") //绑定LidarData结构体
+        .def(py::init<>())
+        .def_readwrite("ranges", &LidarData::ranges)
+        .def_readwrite("angles", &LidarData::angles)
+        .def_readwrite("max_range", &LidarData::max_range) //最大测量范围
+        .def_readwrite("num_beams", &LidarData::num_beams); //光束数量
+
     py::class_<formation::ControlGraph>(m, "ControlGraph") //绑定ControlGraph类
         .def(py::init<int>())
         .def("get_adjacency_matrix", &formation::ControlGraph::getAdjacencyMatrix);

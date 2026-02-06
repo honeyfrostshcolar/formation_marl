@@ -14,7 +14,7 @@ class FormationReward:
         self.safety_weight = safety_weight  # 安全权重
         self.comm_weight = comm_weight  # 通信质量权重
     
-    def compute(self, robot_id, positions, graph):
+    def compute(self, positions, graph):
         """计算总奖励"""
         reward_components = {}
         

@@ -3,9 +3,13 @@ import pybullet as p
 import pybullet_data
 import numpy as np
 import gym
+import pybullet_planning as pp
+import formation_core
+
 from gym import spaces
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from envs.reward_fn import FormationReward
+
 
 class FormationPyBulletEnv(gym.Env):
     """单智能体环境：领航者根据局部观测决策全局编队"""
@@ -13,9 +17,10 @@ class FormationPyBulletEnv(gym.Env):
     def __init__(self, 
                  num_robots=3, 
                  max_steps=100,
-                 radar_rays=18,      # 雷达射线数量（对应18维障碍物特征）
+                 radar_rays=180,      # 雷达射线数量（对应18维障碍物特征）
                  safety_threshold=0.5,
-                 max_comm_distance=5.0):
+                 max_comm_distance=5.0,
+                 candidate_graphs=None):
         super().__init__()
         
         self.num_robots = num_robots
@@ -24,8 +29,12 @@ class FormationPyBulletEnv(gym.Env):
         self.radar_rays = radar_rays
         self.safety_threshold = safety_threshold
         self.max_comm_distance = max_comm_distance
+        self.candidate_graphs = candidate_graphs if candidate_graphs is not None else []
 
         self.reward_fn = FormationReward()
+        self.leader_velocity = [0.1, 0.0, 0.0]  # 每步移动向量 [dx, dy, dz]（单位：米/步）
+        self.leader_pos = [0.0, 0.0, 0.3]       # 初始位置
+        
         
         # 动作 = [编队图索引(离散), 跟随者1_x, 跟随者1_y, ..., 跟随者N_x, 跟随者N_y]
         # 实际训练中：编队图索引由策略网络采样（离散），位置由网络输出（连续）
@@ -37,8 +46,6 @@ class FormationPyBulletEnv(gym.Env):
             dtype=np.float32
         )
         
-        # [0:3] = 领航者位置(x,y,z)
-        # [3:21] = 18维雷达障碍物距离（归一化）
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(21,), dtype=np.float32
         )
@@ -76,8 +83,8 @@ class FormationPyBulletEnv(gym.Env):
         for i in range(self.num_robots):
             robot_id = p.createMultiBody(
                 baseMass=1.0 if i == 0 else 0.5,  # 领航者质量稍大
-                baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_SPHERE, radius=0.2),
-                baseVisualShapeIndex=p.createVisualShape(p.GEOM_SPHERE, radius=0.2, rgbaColor=[1,0,0,1] if i==0 else [0,0,1,1]),
+                baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_SPHERE, radius=0.2), # 碰撞形状
+                baseVisualShapeIndex=p.createVisualShape(p.GEOM_SPHERE, radius=0.2, rgbaColor=[1,0,0,1] if i==0 else [0,0,1,1]), # 视觉形状
                 basePosition=[0, 0, 0.3] if i==0 else [0, 0, 0.1],  # 领航者初始位置
                 baseOrientation=[0,0,0,1]
             )
@@ -85,6 +92,9 @@ class FormationPyBulletEnv(gym.Env):
         
         self.step_count = 0
         self.done = False
+
+        self.leader_pos = [0.0, 0.0, 0.1]  # 重置起点
+        p.resetBasePositionAndOrientation(self.robot_ids[0], self.leader_pos, [0,0,0,1]) # 重置领航者位置
         
         # === 关键修正3：仅返回领航者观测 ===
         return self._get_leader_observation()
@@ -94,24 +104,38 @@ class FormationPyBulletEnv(gym.Env):
         # 1. 领航者自身位姿 (3维: x, y, z)
         leader_pos, leader_orn = p.getBasePositionAndOrientation(self.robot_ids[0])
         obs = np.zeros(21, dtype=np.float32)
-        obs[0:3] = leader_pos[:3]  # 仅取x,y,z（z轴高度）
-        
+
         # 2. 雷达扫描障碍物 (18维: 18个方向的最近障碍物距离)
         # === 关键修正4：实现真实雷达扫描 ===
-        radar_distances = self._scan_radar(leader_pos)
-        obs[3:21] = radar_distances  # 归一化到[0,1]或保留原始距离
+        lidar_data = self._scan_radar(leader_pos)
+        features = formation_core.extract_features(lidar_data)
+
+        obs[0] = features.corridor_width
+        obs[1] = features.front_clearance
+        obs[2] = features.left_clearance
+        obs[3] = features.right_clearance
+        obs[4] = features.obstacle_density
+
+        min_dists = np.array(features.sector_min_dists, dtype=np.float32)
+        avg_dists = np.array(features.sector_avg_dists, dtype=np.float32)
+        obs[4:12] = min_dists
+        obs[12:21] = avg_dists
         
         return obs
     
     def _scan_radar(self, origin_pos):
-        """射线检测模拟雷达（18个方向）"""
-        num_rays = self.radar_rays
+        """射线检测模拟雷达（180个方向）"""
+        num_rays = self.radar_rays # 180个方向
         max_distance = 10.0  # 雷达最大探测距离
         distances = np.zeros(num_rays, dtype=np.float32)
-        
-        # 生成18个水平方向的射线（360度均匀分布）
+
+        lidar_data = formation_core.LidarData()
+        lidar_data.max_range = max_distance
+        lidar_data.num_beams = num_rays
+        # 生成180个水平方向的射线（360度均匀分布）
         for i in range(num_rays):
             angle = 2 * np.pi * i / num_rays
+            lidar_data.angles.append(angle)
             direction = [
                 np.cos(angle), 
                 np.sin(angle), 
@@ -125,24 +149,32 @@ class FormationPyBulletEnv(gym.Env):
             
             # 解析结果：hitFraction=0表示击中自身，1表示无碰撞
             if result[0] != -1 and result[2] > 0.1:  # 排除自身碰撞
-                distances[i] = result[2] * max_distance
+                lidar_data.ranges.append(result[2] * max_distance)
             else:
-                distances[i] = max_distance  # 无障碍物设为最大距离
+                lidar_data.ranges.append(max_distance)  # 无障碍物设为最大距离
         
         # 可选：归一化到[0,1]
         # distances = distances / max_distance
-        return distances
+        return lidar_data
     
     def step(self, action):
         """
         执行领航者决策：
         action = [graph_idx_norm, follower1_x, follower1_y, ..., followerN_x, followerN_y]
         """
+
+        self.leader_pos = [
+            self.leader_pos[0] + self.leader_velocity[0],
+            self.leader_pos[1] + self.leader_velocity[1],
+        0.3  # 固定高度防坠落
+        ]
+        p.resetBasePositionAndOrientation(self.robot_ids[0], self.leader_pos, [0,0,0,1])
+
         # === 关键修正5：解析动作 ===
         # 编队图索引（归一化值 -> 实际索引）
         graph_idx_norm = action[0]  # [-1,1] -> 映射到[0, num_graphs-1]
-        # 实际使用时：在自定义模型中完成离散采样，此处接收具体索引值
-        # 为简化，此处假设graph_idx已由外部处理为整数（训练时需注意）
+
+        action_graph = self.candidate_graphs[graph_idx_norm]
         
         # 跟随者目标相对位置（归一化值 -> 实际坐标）
         follower_positions = []
@@ -162,17 +194,24 @@ class FormationPyBulletEnv(gym.Env):
             ]
             # 直接设置跟随者位置（环境执行，非物理驱动）
             p.resetBasePositionAndOrientation(
-                self.robot_ids[i+1], 
-                abs_pos, 
-                [0,0,0,1]
+                self.robot_ids[i+1],  # 参数1：要重置的刚体ID
+                abs_pos,              # 参数2：目标绝对位置 [x,y,z]
+                [0,0,0,1]             # 参数3：目标绝对旋转四元数 [x,y,z,w]
             )
+
+        robot_positions = []
+        for i in range(self.num_robots):
+            pos, _ = p.getBasePositionAndOrientation(self.robot_ids[i])
+            robot_positions.append(pos)
+
+        positions = np.array(robot_positions)
         
         # 推进物理仿真（仅领航者受物理影响，跟随者由环境重置位置）
         p.stepSimulation()
         self.step_count += 1
         
         # === 关键修正7：奖励基于全局编队状态（但由领航者获得）===
-        reward, reward_details = self._compute_global_reward()
+        reward, reward_details = self.reward_fn.compute(positions, action_graph)
         
         # 终止条件
         done = self.step_count >= self.max_steps
