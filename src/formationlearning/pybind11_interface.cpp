@@ -52,7 +52,7 @@ PYBIND11_MODULE(formation_core, m) {
         .def_readwrite("sector_avg_dists", &EnvironmentFeatures::sector_avg_dists);
 
     py::class_<LidarData>(m, "LidarData") //绑定LidarData结构体
-        .def(py::init<>())
+        .def(py::init<int, double>())
         .def_readwrite("ranges", &LidarData::ranges)
         .def_readwrite("angles", &LidarData::angles)
         .def_readwrite("max_range", &LidarData::max_range) //最大测量范围

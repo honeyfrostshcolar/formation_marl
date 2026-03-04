@@ -15,33 +15,37 @@ class FormationReward:
         self.comm_weight = comm_weight  # 通信质量权重
     
     def compute(self, positions, graph):
-        """计算总奖励"""
-        reward_components = {}
-        
-        # 1. 编队质量奖励
+        # 计算各分量（可能返回张量或 numpy 标量）
         formation_reward = self._formation_quality_reward(graph, positions)
-        reward_components['formation'] = formation_reward
-        
-        # 2. 安全奖励
         safety_penalty = self._safety_penalty(positions)
-        reward_components['safety'] = -safety_penalty
-        
-        # 3. 通信质量奖励
         comm_reward = self._communication_reward(graph, positions)
-        reward_components['communication'] = comm_reward
-        
-        # 4. 任务特定奖励
         task_reward = self._task_reward(positions)
-        reward_components['task'] = task_reward
-        
-        # 加权总奖励
-        total_reward = (
-            self.formation_weight * formation_reward +
-            self.safety_weight * (-safety_penalty) +
-            self.comm_weight * comm_reward +
-            task_reward
-        )
-        
+
+        # 加权总奖励（此时可能仍是张量）
+        # total_reward = (
+        #     self.formation_weight * formation_reward +
+        #     self.safety_weight * (-safety_penalty) +
+        #     self.comm_weight * comm_reward +
+        #     task_reward
+        # )
+
+        total_reward = formation_reward
+
+        # 转换为 Python 标量
+        total_reward = float(total_reward)
+
+        # 构建奖励组件字典，确保所有值都是 Python float
+        # reward_components = {
+        #     'formation': float(formation_reward),
+        #     'safety': float(-safety_penalty),
+        #     'communication': float(comm_reward),
+        #     'task': float(task_reward)
+        # }
+
+        reward_components = {
+            'formation': float(formation_reward),
+        }
+
         return total_reward, reward_components
     
     def _formation_quality_reward(self, graph, positions):
@@ -60,7 +64,7 @@ class FormationReward:
                     error = torch.abs(distance - ideal_distance)
                     reward += torch.exp(-error)
         
-        return reward.item()
+        return reward
     
     def _safety_penalty(self, positions):
         """安全惩罚"""
@@ -76,7 +80,7 @@ class FormationReward:
                 if distance < self.safety_threshold:
                     penalty += (self.safety_threshold - distance) * 10.0
         
-        return penalty.item()
+        return penalty
     
     def _communication_reward(self, graph, positions):
         """通信质量奖励"""
@@ -101,12 +105,12 @@ class FormationReward:
         if connections > 0:
             reward /= connections
         
-        return reward.item()
+        return reward
     
     def _task_reward(self, positions):
         """任务特定奖励，根据具体任务定义"""
         # 示例：如果接近目标区域，给予奖励
         target_area = np.array([5.0, 5.0])  # 目标区域
-        center = positions.mean(axis=0)
+        center = positions.mean(axis=0)[:2]
         distance_to_target = np.linalg.norm(center - target_area)
         return np.exp(-distance_to_target)
