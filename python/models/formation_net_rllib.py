@@ -37,8 +37,8 @@ class ConstrainedFormationNetRLLib(ModelV2):
         # 为每个机器人创建候选图
         self.candidate_graphs = [torch.from_numpy(cg).float() for cg in control_graphs_np]  # 从numpy数组转换为torch张量
 
-        # 输出维度：graph_scores + 每个跟随者的位置
-        self._num_outputs = num_graphs + 2 * self.num_followers # 图分数 + 每个跟随者的(x, y)(在哪里用到了？)
+        # 输出维度：graph_scores 
+        self._num_outputs = num_graphs  # 图分数 
     
     @override(ModelV2)
     def forward(self, input_dict, state, seq_lens):
@@ -87,17 +87,9 @@ class ConstrainedFormationNetRLLib(ModelV2):
         )
 
         self._last_model_output = outputs  # 保存最后的模型输出，供value_function使用
-        
-        # 构建logits：图分数 + 位置参数
-        graph_scores = outputs['graph_scores']  # [batch, num_graphs]
-        
-        # 获取第一个图的位置均值作为连续动作的参数[0]表示位置均值，[1]表示位置标准差
-        position_means = outputs['position_dists'][0].mean  # [batch, num_followers, 2]
-        position_means_flat = position_means.view(batch_size, -1)  # [batch, 2*num_followers]
-        
-        # 合并logits
-        logits = torch.cat([graph_scores, position_means_flat], dim=1)
-        
+
+        # 只返回图分数作为 logits
+        logits = outputs['graph_scores']  # [batch, num_graphs]
         return logits, state
     
     @override(ModelV2)

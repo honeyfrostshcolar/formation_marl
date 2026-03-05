@@ -26,10 +26,10 @@ register_env("FormationPyBulletEnv-v0", make_formation_env)
 
 def main():
     num_robots = 3
-    train_iterations = 200
+    train_iterations = 300
 
-    resume_checkpoint = "/home/lpp/formation_test/data/PPO_FormationPyBulletEnv-v0_bf0000_2026-03-03_22-11-43"
-    # resume_checkpoint = None  # 从头训练时设为None
+    # resume_checkpoint = "/home/lpp/formation_test/data/PPO_FormationPyBulletEnv-v0_3d696c_2026-03-05_13-06-49"
+    resume_checkpoint = None  # 从头训练时设为None
 
     base_save_dir = "/home/lpp/formation_test/data"
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -58,13 +58,19 @@ def main():
         control_graphs_np = np.expand_dims(control_graphs_np, axis=0)
         num_graphs = 1
 
+
+    import logging
+    # 关闭RLlib的非错误日志
+    logging.getLogger("ray.rllib").setLevel(logging.ERROR)
+    logging.getLogger("ray.tune").setLevel(logging.ERROR)
+
     # 初始化Ray
     ray.init(ignore_reinit_error=True, num_cpus=1, num_gpus=0)
 
     # 环境配置
     env_config = {
         "num_robots": num_robots,
-        "max_steps": 100,
+        "max_steps": 50,
         "safety_threshold": 0.5,
         "max_comm_distance": 5.0,
         "candidate_graphs": control_graphs_np
@@ -78,7 +84,7 @@ def main():
     )
     # 动作空间：1 + 2*num_followers 维连续空间（和环境里的定义一致）
     action_space = spaces.Box(
-        low=-1.0, high=1.0, 
+        low=-1.0, high=5.0, 
         shape=(1 + 2 * num_followers,), 
         dtype=np.float32
     )
@@ -92,10 +98,10 @@ def main():
         "disable_env_checking": True,  # 禁用环境检查
         "gamma": 0.99,
         "clip_param": 0.2,
-        "entropy_coeff": 0.01,
+        "entropy_coeff": 0.05, # 增加探索性，避免过早收敛到坏策略
         "vf_loss_coeff": 0.5,
-        "lr": 3e-4,
-        "train_batch_size": 1000,
+        "lr": 1e-4, # PPO通常需要较小的学习率（避免训练震荡）
+        "train_batch_size": 1000, # 增加训练批量大小（避免训练震荡）
         "sgd_minibatch_size": 128,
         "num_sgd_iter": 10,
         "model": {
@@ -159,19 +165,27 @@ def main():
     print(f"Starting PPO training from iteration {start_iter} to {train_iterations}")
     for i in range(start_iter, train_iterations):
         result = trainer.train()
+
         print(f"Iteration {i}:")
         print(f"  Episode reward mean: {result.get('episode_reward_mean', 0.0):.2f}")
         print(f"  Episode length mean: {result.get('episode_len_mean', 0.0):.2f}")
-        print(f"  Total loss: {result.get('total_loss', 0.0):.4f}")
+        learner_stats = result.get('info', {}).get('learner', {}).get('default_policy', {}).get('learner_stats', {})
+        real_total_loss = learner_stats.get('total_loss', 0.0)
+        real_policy_loss = learner_stats.get('policy_loss', 0.0)
+        real_vf_loss = learner_stats.get('vf_loss', 0.0)
+        
+        print(f"  Total loss: {real_total_loss:.4f}")
+        print(f"  Policy loss: {real_policy_loss:.4f}")
+        print(f"  Value loss: {real_vf_loss:.4f}")
         
         # 可选：每10个迭代保存一次检查点
         if i % 10 == 0:
             checkpoint_path = trainer.save(save_root_dir)
-            print(f"  Checkpoint saved to {checkpoint_path}")
+            print(f"  Checkpoint saved to {save_root_dir}")
 
     # 保存最终检查点
     checkpoint_path = trainer.save(save_root_dir)
-    print(f"Final checkpoint saved to {checkpoint_path}")
+    print(f"Final checkpoint saved to {save_root_dir}")
 
     ray.shutdown()
 

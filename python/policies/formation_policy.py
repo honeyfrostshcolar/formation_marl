@@ -16,62 +16,62 @@ class FormationActionDistribution(TorchDistributionWrapper):
     
     def __init__(self, inputs, model):
         super().__init__(inputs, model)
-        batch_size = inputs.shape[0]
-        num_graphs = model.num_graphs
-        num_followers = model.num_followers
-        
-        # 分割输入：图分数 + 位置参数
-        self.graph_logits = inputs[:, :num_graphs]  # [batch, num_graphs]
-        self.position_params = inputs[:, num_graphs:]  # [batch, 2*num_followers]
-        self.position_params = self.position_params.view(batch_size, num_followers, 2)
-        
-        # 创建分布
+
+        self.graph_logits = inputs
         self.graph_dist = torch.distributions.Categorical(logits=self.graph_logits)
-        
-        # 位置分布：使用正态分布
-        position_means = self.position_params
-        position_log_std = model.model.position_log_std.expand_as(position_means)
-        self.position_dist = torch.distributions.Normal(
-            position_means, 
-            torch.exp(position_log_std)
-        )
+
+        # 从模型保存的输出中获取位置分布列表
+        self.position_dists = model._last_model_output['position_dists']
     
     def sample(self):
-        """采样动作（同时采样离散图索引 + 连续位置，再拼接成环境能识别的动作）"""
-        graph_idx = self.graph_dist.sample()
-        positions = self.position_dist.sample()
-        
-        # 合并动作
-        positions_flat = positions.view(positions.shape[0], -1)
-        action = torch.cat([
-            graph_idx.unsqueeze(1).float(),  # 转换为float
-            positions_flat
-        ], dim=1)
-        
+        graph_idx = self.graph_dist.sample()  # [batch]
+        batch_size = graph_idx.shape[0]
+        positions = []
+        for b in range(batch_size):
+            g = graph_idx[b].item()
+            pos_dist = self.position_dists[g]
+            # 注意：position_dists[g] 是一个分布对象，其参数具有 batch 维度
+            pos_sample = pos_dist.sample()  # [batch, num_followers, 2]
+            positions.append(pos_sample[b])  # 取对应样本
+        positions = torch.stack(positions)  # [batch, num_followers, 2]
+        positions_flat = positions.view(batch_size, -1)
+        action = torch.cat([graph_idx.unsqueeze(1).float(), positions_flat], dim=1)
         return action
     
     def deterministic_sample(self):
         """返回确定性动作（用于评估模式）"""
-        graph_idx = torch.argmax(self.graph_logits, dim=-1)
-        positions = self.position_dist.mean
-        positions_flat = positions.view(positions.shape[0], -1)
-        action = torch.cat([
-            graph_idx.unsqueeze(1).float(),
-            positions_flat
-        ], dim=1)
+        graph_idx = torch.argmax(self.graph_logits, dim=-1)  # [batch]
+        batch_size = graph_idx.shape[0]
+        positions = []
+        for b in range(batch_size):
+            g = graph_idx[b].item()
+            # 取对应位置分布的均值（形状 [batch, num_followers, 2]）
+            pos_mean = self.position_dists[g].mean
+            positions.append(pos_mean[b])  # 取当前样本的均值
+        positions = torch.stack(positions)  # [batch, num_followers, 2]
+        positions_flat = positions.view(batch_size, -1)
+        action = torch.cat([graph_idx.unsqueeze(1).float(), positions_flat], dim=1)
         return action
     
     def logp(self, actions):
-        """计算动作的对数概率"""
         graph_idx = actions[:, 0].long()
         positions = actions[:, 1:].view(-1, self.model.num_followers, 2)
+        batch_size = graph_idx.shape[0]
+        log_probs = []
+        for b in range(batch_size):
+            g = graph_idx[b].item()
+            pos_dist = self.position_dists[g]
+            pos_logp = pos_dist.log_prob(positions[b]).sum()
+            log_probs.append(pos_logp)
+        pos_logp = torch.stack(log_probs)
         graph_logp = self.graph_dist.log_prob(graph_idx)
-        position_logp = self.position_dist.log_prob(positions).sum(dim=[1, 2])
-        return graph_logp + position_logp
+        return graph_logp + pos_logp
     
     def entropy(self):
-        """计算分布熵"""
-        return self.graph_dist.entropy() + self.position_dist.entropy().mean(dim=[1, 2])
+        # 简化：图熵 + 平均位置熵
+        graph_entropy = self.graph_dist.entropy()
+        pos_entropy = torch.mean(torch.stack([d.entropy().mean() for d in self.position_dists]))
+        return graph_entropy + pos_entropy
     
     def kl(self, other=None):
         """KL散度（简化实现，返回0）"""
@@ -82,7 +82,7 @@ class FormationActionDistribution(TorchDistributionWrapper):
         return self.logp(self.sample())
     
 
-
+# 定义自定义的动作分布函数，供策略使用（怎么从观测算出动作）
 def custom_action_distribution_fn(model, obs_batch, **kwargs):
     # 类似地，处理 obs_batch
     if hasattr(obs_batch, "keys") and "obs" in obs_batch:
@@ -97,7 +97,11 @@ def custom_action_distribution_fn(model, obs_batch, **kwargs):
     obs = obs.to(device)
 
     input_dict = {"obs": obs}
-    logits, state = model(input_dict, [], None)
+    logits, state = model(input_dict, [], None) # logits：模型给所有动作选项的原始分数 。state：模型的 “状态输出”（RNN 用）
+
+    # print("logits", logits)
+    # print(f"logits shape: {logits.shape}, mean: {logits.mean().item()}, std: {logits.std().item()}")
+    # print(f"graph_scores part: {logits[0, :3]}")  # 假设 batch=1
     return logits, FormationActionDistribution, state
 
 def custom_extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
@@ -112,6 +116,7 @@ def custom_extra_action_out_fn(policy, input_dict, state_batches, model, action_
             extra_outputs["value"] = value
     return extra_outputs
 
+# 定义自定义的损失函数，供策略使用（训练时怎么计算损失）
 def custom_loss_fn(policy, model, dist_class, train_batch):
     # 获取数据，如果缺失则使用虚拟数据（初始化阶段）
     obs = train_batch.get(SampleBatch.OBS, None)
@@ -148,7 +153,7 @@ def custom_loss_fn(policy, model, dist_class, train_batch):
     #             print(f"  → first 3 values: {value[:3]}")
     # print(f"advantages raw: {advantages}")  # 如果是 numpy 数组，打印前几个值
 
-    # print(f"advantages mean: {advantages.mean()}, advantages std: {advantages.std()}")
+    # print(f"advantages mean: {advantages.mean().item()}, advantages std: {advantages.std().item()}")
     # print(f"returns mean: {returns.mean()}, returns std: {returns.std()}")
 
 
@@ -229,6 +234,7 @@ def custom_loss_fn(policy, model, dist_class, train_batch):
 
     return total_loss, stats
 
+# 定义自定义的后处理函数，供策略使用（跑完一局，怎么整理数据）
 def custom_postprocess_fn(policy, sample_batch, other_agent_batches, episode):
 
 

@@ -52,7 +52,8 @@ class ConstrainedFormationNet(nn.Module):
         self.position_generator = nn.Sequential(
             nn.Linear(64, 32),  # GNN输出的节点特征
             nn.ReLU(),
-            nn.Linear(32, 2)    # 每个机器人的2D位置
+            nn.Linear(32, 2),   # 每个机器人的2D位置
+            nn.Tanh()
         )
         
         # 4. 图结构编码器（将控制图编码为特征向量）

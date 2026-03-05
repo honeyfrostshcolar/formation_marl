@@ -20,8 +20,9 @@ class FormationPyBulletEnv(gym.Env):
         self.candidate_graphs = config.get("candidate_graphs", [])
 
         self.reward_fn = FormationReward()
-        self.leader_velocity = [0.1, 0.0, 0.0]
+        self.leader_velocity = [0.0, 0.1, 0.0]
         self.leader_pos = [0.0, 0.0, 0.3]
+        self.obstacle_ids = [10]
 
         # 根据 render 参数决定连接模式（训练时通常为 False）
         render = config.get("render", False)
@@ -64,8 +65,8 @@ class FormationPyBulletEnv(gym.Env):
         # 创建机器人
         self.robot_ids = []
         for i in range(self.num_robots):
-            col_id = p.createCollisionShape(p.GEOM_SPHERE, radius=0.2)
-            vis_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.2, rgbaColor=[1,0,0,1] if i==0 else [0,0,1,1])
+            col_id = p.createCollisionShape(p.GEOM_SPHERE, radius=0.2) # 碰撞形状：球形，半径0.2米（物理引擎用，决定碰撞检测）
+            vis_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.2, rgbaColor=[1,0,0,1] if i==0 else [0,0,1,1]) # 视觉形状：球形，半径0.2米（渲染用，和碰撞形状一致）
             robot_id = p.createMultiBody(
                 baseMass=1.0 if i == 0 else 0.5,
                 baseCollisionShapeIndex=col_id,
@@ -135,11 +136,14 @@ class FormationPyBulletEnv(gym.Env):
         self.leader_pos[1] += self.leader_velocity[1]
         p.resetBasePositionAndOrientation(self.robot_ids[0], self.leader_pos, [0,0,0,1])
         
+        #print("action:", action)
+        # import sys
+        # sys.exit(0)
         # 跟随者目标相对位置
         follower_positions = []
         for i in range(self.num_followers):
-            rel_x = action[1 + 2*i] * 5.0
-            rel_y = action[1 + 2*i + 1] * 5.0
+            rel_x = action[1 + 2*i] * 2.0 # 映射米的物理范围
+            rel_y = action[1 + 2*i + 1] * 2.0
             follower_positions.append([rel_x, rel_y])
         
         leader_pos, _ = p.getBasePositionAndOrientation(self.robot_ids[0])
@@ -159,9 +163,16 @@ class FormationPyBulletEnv(gym.Env):
         
         p.stepSimulation()
         self.step_count += 1
+
+        #print("positions:", positions)
         
         reward, reward_details = self.reward_fn.compute(positions, action_graph)
         done = self.step_count >= self.max_steps
+
+        if self._check_collision_with_obstacles():
+            done = True
+            reward += -10.0
+
         obs = self._get_leader_observation()
         info = {
             "reward_details": reward_details,
@@ -172,3 +183,13 @@ class FormationPyBulletEnv(gym.Env):
     
     def close(self):
         p.disconnect(self.physics_client)
+
+    def _check_collision_with_obstacles(self):
+        for robot_id in self.robot_ids:
+            # 获取所有接触点
+            contact_points = p.getContactPoints(robot_id)
+            for cp in contact_points:
+                # 检查对方物体是否是障碍物（可以根据ID或名称判断）
+                if cp[2] in self.obstacle_ids:
+                    return True
+        return False
