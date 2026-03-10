@@ -17,13 +17,14 @@ class FormationActionDistribution(TorchDistributionWrapper):
     def __init__(self, inputs, model):
         super().__init__(inputs, model)
 
-        self.graph_logits = inputs
-        self.graph_dist = torch.distributions.Categorical(logits=self.graph_logits)
+        self.graph_logits = inputs # graph_logits 不是分布本身，是输入到「分类分布（Categorical）」的原始数值
+        self.graph_dist = torch.distributions.Categorical(logits=self.graph_logits) # 自动在内部完成 softmax 归一化
 
         # 从模型保存的输出中获取位置分布列表
         self.position_dists = model._last_model_output['position_dists']
     
     def sample(self):
+    
         graph_idx = self.graph_dist.sample()  # [batch]
         batch_size = graph_idx.shape[0]
         positions = []
@@ -36,10 +37,15 @@ class FormationActionDistribution(TorchDistributionWrapper):
         positions = torch.stack(positions)  # [batch, num_followers, 2]
         positions_flat = positions.view(batch_size, -1)
         action = torch.cat([graph_idx.unsqueeze(1).float(), positions_flat], dim=1)
+        # print("[policy]action:", action)
         return action
     
     def deterministic_sample(self):
         """返回确定性动作（用于评估模式）"""
+
+        # print("graph_logits:", self.graph_logits)
+        # print("position_dists:", self.position_dists)
+
         graph_idx = torch.argmax(self.graph_logits, dim=-1)  # [batch]
         batch_size = graph_idx.shape[0]
         positions = []
@@ -51,6 +57,10 @@ class FormationActionDistribution(TorchDistributionWrapper):
         positions = torch.stack(positions)  # [batch, num_followers, 2]
         positions_flat = positions.view(batch_size, -1)
         action = torch.cat([graph_idx.unsqueeze(1).float(), positions_flat], dim=1)
+
+        # print("Deterministic graph_idx:", graph_idx)
+        # print("Deterministic positions:", positions)
+
         return action
     
     def logp(self, actions):

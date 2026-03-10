@@ -33,8 +33,9 @@ EnvironmentFeatures FeatureExtractor::extractFeatures(const LidarData& lidar) {
             }
         }
         
-        features.sector_min_dists[i] = (min_dist < lidar.max_range) ? min_dist : lidar.max_range;
+        features.sector_min_dists[i] = (min_dist < lidar.max_range) ? min_dist : lidar.max_range; // 当前扇区的最小距离
         features.sector_avg_dists[i] = (count > 0) ? (sum_dist / count) : lidar.max_range; // 当前扇区的平均距离
+        // if(i==7) std::cout << "7号扇区的平均距离：" << features.sector_avg_dists[i] << std::endl;
     }
     
     // 提取关键特征

@@ -39,11 +39,10 @@ class FormationPyBulletEnv(gym.Env):
         p.setTimeStep(0.01)
 
         # 动作空间和观测空间
-        self.action_space = spaces.Box(
-            low=-1.0, high=1.0,
-            shape=(1 + 2 * self.num_followers,),
-            dtype=np.float32
-        )
+        self.action_space = spaces.Dict({
+            "graph_idx": spaces.Discrete(len(self.candidate_graphs)),
+            "positions": spaces.Box(low=-1.0, high=1.0, shape=(self.num_followers * 2,), dtype=np.float32)
+        })
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(21,), dtype=np.float32
         )
@@ -126,6 +125,9 @@ class FormationPyBulletEnv(gym.Env):
         return lidar_data
     
     def step(self, action):
+        graph_idx = action["graph_idx"]
+        action_graph = self.candidate_graphs[graph_idx]
+        pos_action = action["positions"]
         graph_idx_norm = action[0]
         graph_idx = int((graph_idx_norm + 1) / 2 * (len(self.candidate_graphs) - 1))
         graph_idx = np.clip(graph_idx, 0, len(self.candidate_graphs) - 1)
@@ -179,6 +181,10 @@ class FormationPyBulletEnv(gym.Env):
             "leader_pos": leader_pos,
             "follower_positions": follower_positions
         }
+
+        # if self.step_count % 5 == 0:
+        #     print(f"Step {self.step_count}: Graph={graph_idx}, Distances={distances}")
+
         return obs, reward, done, info
     
     def close(self):
