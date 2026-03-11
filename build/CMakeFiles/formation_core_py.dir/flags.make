@@ -6,5 +6,5 @@ CXX_FLAGS =  -fPIC -fPIC -fvisibility=hidden   -Wall -Wextra -O2 -Wno-unused-par
 
 CXX_DEFINES = -Dformation_core_py_EXPORTS
 
-CXX_INCLUDES = -I/home/lpp/formation_test/include -I/home/lpp/miniconda3/envs/py310/include/python3.10 -isystem /usr/include/eigen3 
+CXX_INCLUDES = -I/home/nankai/formation_test/include -I/home/nankai/miniconda3/envs/py310/include/python3.10 -isystem /usr/include/eigen3 
 

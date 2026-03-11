@@ -2,46 +2,52 @@ import os
 import ray
 import time
 import numpy as np
-import torch
 import uuid 
+import logging
+import shutil  # 用于覆盖旧检查点文件夹
+
+from ray.tune.registry import register_env
+from envs.formation_2d_env import Formation2DEnv
+from models.formation_net_rllib import ConstrainedFormationNetRLLib
+from ray.rllib.algorithms.ppo import PPO
 
 # 清空PYTHONPATH（避免导入冲突）
 if "PYTHONPATH" in os.environ:
     del os.environ["PYTHONPATH"]
 
-# 导入自定义模块
-from envs.formation_pybullet_env import FormationPyBulletEnv
-from models.formation_net_rllib import ConstrainedFormationNetRLLib
-from policies.formation_policy import CustomFormationPolicy
-
-# 新增：导入gymnasium spaces（用于定义观测/动作空间）
-from gymnasium.wrappers import EnvCompatibility
-from ray.tune.registry import register_env
-from gymnasium import spaces
-
-# 定义环境创建函数并注册
-def make_formation_env(cfg):
-    return EnvCompatibility(FormationPyBulletEnv(cfg))
-register_env("FormationPyBulletEnv-v0", make_formation_env)
+# 注册环境
+register_env("Formation2DEnv-v0", lambda config: Formation2DEnv(config))
 
 def main():
-    num_robots = 3
-    train_iterations = 300
+    max_robots = 10  
+    num_robots = 5
+    train_iterations = 2000  # 训练总轮数
 
-    # resume_checkpoint = "/home/lpp/formation_test/data/PPO_FormationPyBulletEnv-v0_3d696c_2026-03-05_13-06-49"
-    resume_checkpoint = None  # 从头训练时设为None
+    base_save_dir = "/home/nankai/formation_test/data"
+    
+    # ==========================================
+    # ✅ 断点续训设置 (Resume Training)
+    # ==========================================
+    # 如果你想从头训练，保持 None
+    # resume_checkpoint = None  
+    
+    # 如果你想继续训练，把下面这行的注释打开，并填入你上一次保存的 latest_checkpoint 路径：
+    resume_checkpoint = "/home/nankai/formation_test/data/PPO_FormationPyBulletEnv-v0_16355e_2026-03-10_15-56-13/latest_checkpoint"  # 替换为你的检查点路径
+    
+    # ==========================================
 
-    base_save_dir = "/home/lpp/formation_test/data"
+    # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-    # 生成随机后缀（避免同一时间多次训练冲突）
-    random_suffix = uuid.uuid4().hex[:6]  # 取6位随机字符串
+    random_suffix = uuid.uuid4().hex[:6]
     task_dir = f"PPO_FormationPyBulletEnv-v0_{random_suffix}_{timestamp}"
-    # 完整的保存根目录
     save_root_dir = os.path.join(base_save_dir, task_dir)
     os.makedirs(save_root_dir, exist_ok=True)
+    
+    # 我们在这个任务文件夹下，固定用 "latest_checkpoint" 来保存最新模型
+    fixed_checkpoint_dir = os.path.join(save_root_dir, "latest_checkpoint")
     print(f"本次训练的根目录：{save_root_dir}")
 
-    # 初始化C++模块获取控制图
+    # 模拟候选图
     try:
         import formation_core
         cpp_enumerator = formation_core.FormationEnumerator(num_robots)
@@ -51,141 +57,120 @@ def main():
             adj_np = cg.get_adjacency_matrix()
             adj_np_list.append(adj_np)
         control_graphs_np = np.stack(adj_np_list, axis=0)
-        num_graphs = control_graphs_np.shape[0]
     except ImportError:
-        print("Warning: formation_core module not found, using dummy graphs")
-        control_graphs_np = np.eye(num_robots, dtype=np.float32)
-        control_graphs_np = np.expand_dims(control_graphs_np, axis=0)
-        num_graphs = 1
+        print("Warning: formation_core module not found, using manual graphs")
+        g1 = np.array([[0, 1, 1], [1, 0, 0], [1, 0, 0]], dtype=np.float32)
+        g2 = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=np.float32)
+        g3 = np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]], dtype=np.float32)
+        control_graphs_np = np.stack([g1, g2, g3], axis=0)
+    
+    num_graphs = control_graphs_np.shape[0]
 
-
-    import logging
-    # 关闭RLlib的非错误日志
+    # 关闭RLlib的非错误日志，保持控制台清爽
     logging.getLogger("ray.rllib").setLevel(logging.ERROR)
     logging.getLogger("ray.tune").setLevel(logging.ERROR)
 
-    # 初始化Ray
     ray.init(ignore_reinit_error=True, num_cpus=1, num_gpus=0)
 
-    # 环境配置
     env_config = {
         "num_robots": num_robots,
-        "max_steps": 50,
+        "max_robots": max_robots,
+        "max_steps": 100,
         "safety_threshold": 0.5,
-        "max_comm_distance": 5.0,
-        "candidate_graphs": control_graphs_np
+        "candidate_graphs": control_graphs_np,
+        "render": True  # ⚠️ 训练时必须关闭渲染以保证速度！
     }
 
-    # ✅ 关键新增：手动定义观测空间和动作空间（和环境里的定义保持一致）
-    num_followers = num_robots - 1
-    # 观测空间：21维连续空间（和FormationPyBulletEnv里的定义一致）
-    observation_space = spaces.Box(
-        low=-np.inf, high=np.inf, shape=(21,), dtype=np.float32
-    )
-    # 动作空间：1 + 2*num_followers 维连续空间（和环境里的定义一致）
-    action_space = spaces.Box(
-        low=-1.0, high=5.0, 
-        shape=(1 + 2 * num_followers,), 
-        dtype=np.float32
-    )
-
-    # 使用字典配置（替代链式API）
-    from ray.rllib.algorithms.ppo import PPO
-    config = {} 
-    config.update({
-        "env": "FormationPyBulletEnv-v0",
+    config = {
+        "env": "Formation2DEnv-v0",
         "env_config": env_config,
-        "disable_env_checking": True,  # 禁用环境检查
+        "framework": "torch",
+        
+        # ✅ 我们已经加入了路径规划，这里必须恢复马尔可夫链的长期折现参数
         "gamma": 0.99,
-        "clip_param": 0.2,
-        "entropy_coeff": 0.05, # 增加探索性，避免过早收敛到坏策略
-        "vf_loss_coeff": 0.5,
-        "lr": 1e-4, # PPO通常需要较小的学习率（避免训练震荡）
-        "train_batch_size": 1000, # 增加训练批量大小（避免训练震荡）
+        "use_gae": True,
+        "lambda": 0.95,
+        "batch_mode": "truncate_episodes", 
+        
+        "lr": 5e-5,
+        "train_batch_size": 1000,
         "sgd_minibatch_size": 128,
         "num_sgd_iter": 10,
+        "clip_param": 0.1,
+        
         "model": {
             "custom_model": ConstrainedFormationNetRLLib,
             "custom_model_config": {
                 "feature_dim": 21,
-                "num_graphs": num_graphs,
-                "max_robots": 10,
                 "control_graphs": control_graphs_np,
-                "num_robots": num_robots
+                "num_robots": num_robots,
+                "max_robots": max_robots
             }
         },
-        "framework": "torch",
+        
         "num_workers": 0,
-        "rollout_fragment_length": 200,
-        "batch_mode": "truncate_episodes",
-        "num_gpus": 0,
-        "num_cpus_per_worker": 1,
-        "num_gpus_per_worker": 0,
-        "evaluation_num_workers": 0,
-        "evaluation_interval": 1,
-        "evaluation_duration": 5,
-
-        # ✅ 关键修改：给策略手动指定observation_space和action_space
-        "multiagent": {
-            "policies": {
-                "default_policy": (
-                    CustomFormationPolicy,       # 策略类
-                    observation_space,           # 观测空间（手动指定）
-                    action_space,                # 动作空间（手动指定）
-                    {}                           # 策略配置（空即可）
-                )
-            },
-            "policy_mapping_fn": lambda agent_id, *args, **kwargs: "default_policy"
-        },
-
         "logger_config": {
-        "type": "ray.tune.logger.TBXLogger",  # 启用TensorBoard日志
-        "logdir": save_root_dir,  # 日志保存到自定义的训练目录
+            "type": "ray.tune.logger.TBXLogger",
+            "logdir": save_root_dir,
         }
-    })
+    }
 
     # 创建训练器
     trainer = PPO(config=config)
 
+    # ==========================================
+    # ✅ 执行断点续训加载逻辑
+    # ==========================================
     if resume_checkpoint is not None:
         if os.path.exists(resume_checkpoint):
-            print(f"从检查点恢复训练：{resume_checkpoint}")
+            print(f"\n[恢复训练] 正在加载检查点：{resume_checkpoint}")
             trainer.restore(resume_checkpoint)
-            start_iter = trainer.iteration  # 获取训练器当前的迭代数
-            print(f"恢复后的当前迭代：{start_iter}")
+            start_iter = trainer.iteration  # 获取之前已经训练的迭代数
+            print(f"[恢复成功] 将从第 {start_iter} 轮继续训练！\n")
         else:
-            print(f"检查点路径不存在：{resume_checkpoint}，将从头开始训练")
+            print(f"\n[警告] 检查点路径不存在：{resume_checkpoint}，将从头开始训练！\n")
             start_iter = 0
     else:
-        print("从头开始训练")
+        print("\n[全新训练] 从头开始训练...\n")
         start_iter = 0
 
-    
-    # 训练循环：从start_iter开始，不是从0开始
-    print(f"Starting PPO training from iteration {start_iter} to {train_iterations}")
+    # ==========================================
+    # ✅ 训练主循环
+    # ==========================================
+    print(f"目标：训练至第 {train_iterations} 轮")
     for i in range(start_iter, train_iterations):
         result = trainer.train()
 
         print(f"Iteration {i}:")
         print(f"  Episode reward mean: {result.get('episode_reward_mean', 0.0):.2f}")
         print(f"  Episode length mean: {result.get('episode_len_mean', 0.0):.2f}")
-        learner_stats = result.get('info', {}).get('learner', {}).get('default_policy', {}).get('learner_stats', {})
-        real_total_loss = learner_stats.get('total_loss', 0.0)
-        real_policy_loss = learner_stats.get('policy_loss', 0.0)
-        real_vf_loss = learner_stats.get('vf_loss', 0.0)
         
-        print(f"  Total loss: {real_total_loss:.4f}")
-        print(f"  Policy loss: {real_policy_loss:.4f}")
-        print(f"  Value loss: {real_vf_loss:.4f}")
+        # 提取 Loss 数据 (适配较新版本的 Ray 字典结构)
+        learner_stats = result.get('info', {}).get('learner', {})
+        # 根据 Ray 版本不同，可能在 default_policy 下，也可能直接在 learner 里
+        if 'default_policy' in learner_stats:
+            stats = learner_stats['default_policy'].get('learner_stats', {})
+        else:
+            stats = learner_stats.get('learner_stats', {})
+
+        real_total_loss = stats.get('total_loss', 0.0)
+        real_policy_loss = stats.get('policy_loss', 0.0)
+        real_vf_loss = stats.get('vf_loss', 0.0)
         
-        # 可选：每10个迭代保存一次检查点
-        if i % 10 == 0:
-            checkpoint_path = trainer.save(save_root_dir)
-            print(f"  Checkpoint saved to {save_root_dir}")
+        print(f"  Total loss: {real_total_loss:.4f} | Policy loss: {real_policy_loss:.4f} | Value loss: {real_vf_loss:.4f}")
+        
+        # ✅ 每10个迭代保存一次，并覆盖同一个文件夹
+        if (i + 1) % 10 == 0:
+            if os.path.exists(fixed_checkpoint_dir):
+                shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
+            trainer.save(fixed_checkpoint_dir)
+            print(f"  [Checkpoint 已更新] 最新模型在此处 -> {fixed_checkpoint_dir}")
 
     # 保存最终检查点
-    checkpoint_path = trainer.save(save_root_dir)
-    print(f"Final checkpoint saved to {save_root_dir}")
+    if os.path.exists(fixed_checkpoint_dir):
+        shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
+    trainer.save(fixed_checkpoint_dir)
+    print(f"\n🎉 训练全部结束！最终模型保存在: {fixed_checkpoint_dir}")
 
     ray.shutdown()
 

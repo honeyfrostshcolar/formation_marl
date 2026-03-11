@@ -4,7 +4,7 @@
 CMakeFiles/formation_main.dir/src/main.cpp.o
  ../include/core/constraints.h
  ../include/core/control_graph.h
- /home/lpp/formation_test/src/main.cpp
+ /home/nankai/formation_test/src/main.cpp
  /usr/include/eigen3/Eigen/Cholesky
  /usr/include/eigen3/Eigen/Core
  /usr/include/eigen3/Eigen/Dense

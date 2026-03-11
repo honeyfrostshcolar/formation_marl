@@ -6,5 +6,5 @@ CXX_FLAGS =  -fPIC   -Wall -Wextra -O2 -Wno-unused-parameter -Wno-sign-compare -
 
 CXX_DEFINES = 
 
-CXX_INCLUDES = -I/home/lpp/formation_test/include -isystem /usr/include/eigen3 
+CXX_INCLUDES = -I/home/nankai/formation_test/include -isystem /usr/include/eigen3 
 

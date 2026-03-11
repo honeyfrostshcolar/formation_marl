@@ -1,5 +1,5 @@
-if(EXISTS "/home/lpp/formation_test/build/test_visualization[1]_tests.cmake")
-  include("/home/lpp/formation_test/build/test_visualization[1]_tests.cmake")
+if(EXISTS "/home/nankai/formation_test/build/test_visualization[1]_tests.cmake")
+  include("/home/nankai/formation_test/build/test_visualization[1]_tests.cmake")
 else()
   add_test(test_visualization_NOT_BUILT test_visualization_NOT_BUILT)
 endif()

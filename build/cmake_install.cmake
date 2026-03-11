@@ -1,4 +1,4 @@
-# Install script for directory: /home/lpp/formation_test
+# Install script for directory: /home/nankai/formation_test
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -45,5 +45,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/lpp/formation_test/build/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/nankai/formation_test/build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")

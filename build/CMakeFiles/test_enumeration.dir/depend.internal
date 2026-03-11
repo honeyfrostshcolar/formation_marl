@@ -4,7 +4,7 @@
 CMakeFiles/test_enumeration.dir/test/test_enumeration.cpp.o
  ../include/core/control_graph.h
  ../include/enumeration/formation_enumeration.h
- /home/lpp/formation_test/test/test_enumeration.cpp
+ /home/nankai/formation_test/test/test_enumeration.cpp
  /usr/include/eigen3/Eigen/Cholesky
  /usr/include/eigen3/Eigen/Core
  /usr/include/eigen3/Eigen/Dense
