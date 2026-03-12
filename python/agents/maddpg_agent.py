@@ -33,17 +33,18 @@ class MADDPG_Agent:
         
         self.actor.eval() # 切换到预测模式
         with torch.no_grad():
-            action_tensor = self.actor(obs_tensor)
+            action_tensor, hard_weights, soft_weights = self.actor(obs_tensor)
         self.actor.train() # 切回训练模式
         
         action = action_tensor.cpu().numpy()
+        graphs = hard_weights.cpu().numpy()
         
         # MADDPG 是确定性策略，必须手动加高斯噪声来探索环境
         if add_noise:
             noise = np.random.normal(0, 0.15, size=action.shape) # 0.15是噪声方差，可调
             action = np.clip(action + noise, -1.0, 1.0) # 保证动作不越界
             
-        return action
+        return action, graphs
 
     def update(self, sample_batch):
         """
@@ -70,7 +71,7 @@ class MADDPG_Agent:
             next_actions = []
             for i in range(self.num_followers):
                 # 抽出第 i 个小弟的 next_obs 输入网络
-                n_a = self.target_actor(next_obs_batch[:, i, :]) 
+                n_a, _, _ = self.target_actor(next_obs_batch[:, i, :]) 
                 next_actions.append(n_a)
             # 拼成全局动作 (64, num_followers * action_dim)
             global_next_actions = torch.cat(next_actions, dim=-1) 
@@ -99,7 +100,7 @@ class MADDPG_Agent:
         # 1. 让最新的 Actor 对当前状态重新做一次决策
         curr_actions = []
         for i in range(self.num_followers):
-            c_a = self.actor(obs_batch[:, i, :])
+            c_a, _, _ = self.actor(obs_batch[:, i, :]) 
             curr_actions.append(c_a)
         global_curr_actions = torch.cat(curr_actions, dim=-1)
 
