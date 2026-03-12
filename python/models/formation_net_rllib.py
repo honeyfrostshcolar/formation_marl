@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from models.formation_net import ConstrainedFormationNet
+from python.models.g2anet_maddpg import ConstrainedFormationNet
 
 class ConstrainedFormationNetRLLib(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kwargs):
