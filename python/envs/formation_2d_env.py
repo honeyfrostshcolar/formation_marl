@@ -60,7 +60,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         # 维度 = 自己的雷达(21) + 老大的位置(2) + 最多3个兄弟的信息(3 * 3)
         # 兄弟信息为什么是 3 维？因为除了相对位移 (dx, dy)，我们还需要一个标志位 (is_valid)
         # 来告诉网络“这个槽位是不是真实存在的兄弟”（防止填 0 时被网络误认为是坐标原点的兄弟）
-        obs_dim = 21 + 2 + (self.max_visible_teammates * 3)
+        obs_dim = 21 + 2 + (self.max_visible_teammates * 3) + 2
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -382,7 +382,14 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             teammates_obs[idx+1] = e['rel_pos'][1]
             teammates_obs[idx+2] = 1.0 # 真实存在的标记
             
-        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs])
+        side = 1.0 if follower_idx % 2 == 0 else -1.0
+        rank = (follower_idx + 2) // 2
+        max_rank = max(1, (self.num_followers + 1) // 2)
+        rank_norm = rank / max_rank
+
+        role_code = np.array([side, rank_norm], dtype=np.float32)
+
+        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code])
         return obs
 
     def _simulate_radar(self, origin_pos):

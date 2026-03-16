@@ -28,7 +28,7 @@ def main():
     # ==========================================
     # 🚨 第一步：填写你最终训练的模型路径！(请替换成你真实的 latest_checkpoint 路径)
     # ==========================================
-    model_path = "/home/lpp/formation_test/data/MADDPG_Formation_94ece9_2026-03-16_16-25-47/latest_checkpoint"
+    model_path = "/home/lpp/formation_test/data/MADDPG_Formation_a0a92c_2026-03-16_18-56-27/latest_checkpoint"
     
     # ==========================================
     # 2. 初始化环境 (开启渲染)

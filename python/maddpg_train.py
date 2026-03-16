@@ -55,7 +55,7 @@ def main():
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
     # resume_checkpoint = None  
-    resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_94ece9_2026-03-16_16-25-47/latest_checkpoint" 
+    resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_a0a92c_2026-03-16_18-56-27/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
