@@ -28,13 +28,13 @@ def main():
     # ==========================================
     # 🚨 第一步：填写你最终训练的模型路径！(请替换成你真实的 latest_checkpoint 路径)
     # ==========================================
-    model_path = "/home/nankai/formation_test/data/MADDPG_Formation_826efe_2026-03-15_18-23-18/latest_checkpoint"
+    model_path = "/home/lpp/formation_test/data/MADDPG_Formation_94ece9_2026-03-16_16-25-47/latest_checkpoint"
     
     # ==========================================
     # 2. 初始化环境 (开启渲染)
     # ==========================================
     config = {
-        "num_robots": 6, 
+        "num_robots": 3, 
         "max_steps": 500, # 可以设长一点，看看能坚持多久
         "render": True,   # ✅ 必须开启渲染！我们要看动画！
         "sensing_radius": 5.0
@@ -64,12 +64,13 @@ def main():
         
         for step in range(config["max_steps"]):
             # ✅ 核心：add_noise=False 绝对不加任何探索噪音！纯靠真实实力！
-            actions_array, graphs_array = agent.select_action(obs_array, add_noise=False)
+            actions_array, graphs_array, graphs_soft_array = agent.select_action(obs_array, add_noise=False)
             action_dict = {agent_ids[i]: actions_array[i] for i in range(num_followers)}
             graph_dict = {agent_ids[i]: graphs_array[i] for i in range(num_followers)}
+            graph_soft_dict = {agent_ids[i]: graphs_soft_array[i] for i in range(num_followers)}
             
             # 环境步进
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict)
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict, graph_soft_dict)
             next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in agent_ids])
             
             team_reward = reward_dict[agent_ids[0]]

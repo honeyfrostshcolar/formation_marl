@@ -54,8 +54,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_826efe_2026-03-15_18-23-18/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_94ece9_2026-03-16_16-25-47/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -89,7 +89,7 @@ def main():
     agent = MADDPG_Agent(num_followers=num_followers, obs_dim=obs_dim, action_dim=action_dim)
     
     buffer = ReplayBuffer(
-        capacity=100000, 
+        capacity=10000, 
         num_followers=num_followers, 
         obs_dim=obs_dim, 
         action_dim=action_dim, 
@@ -118,7 +118,7 @@ def main():
     for episode in range(start_episode, train_iterations):
 
         if episode < 2000:
-            current_noise = 0.15
+            current_noise = 0.08
         else:
             progress = min(1.0, (episode - 2000) / 1000)
             current_noise = 0.10 - progress * 0.09

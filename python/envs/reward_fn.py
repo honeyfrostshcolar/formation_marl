@@ -154,7 +154,7 @@ class MADDPGFormationReward:
             slot_error = np.sqrt((local_x - target_local_x)**2 + (local_y - target_local_y)**2)
             
             # 偏差越大，扣分越狠 (乘以一个权重，比如 2.0)
-            geometry_score -= slot_error  
+            geometry_score += np.exp(-slot_error) 
 
         team_reward += self.w_geometry * geometry_score
         reward_details['geometry'] += (self.w_geometry * geometry_score)

@@ -107,7 +107,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             np.random.seed(seed)
             
         while True:
-            start_idx = self._get_random_free_point()
+            start_idx = self._get_random_free_point_with_clearance(2.5)
             # world_start = self._grid_to_world(*start_idx)
             # print("World start:", world_start)
             goal_idx = self._get_random_free_point()
@@ -511,3 +511,40 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         kernel = x**2 + y**2 <= inflation_pixels**2
         inflated_grid = binary_dilation(grid, structure=kernel)
         return inflated_grid
+    
+    def _get_random_free_point_with_clearance(self, clearance_meters):
+        """
+        随机找一个自由点，并保证该点周围 clearance_meters 半径内没有障碍物
+        """
+        height, width = self.map_grid.shape
+        clearance_pixels = int(clearance_meters / self.map_resolution)
+
+        while True:
+            x = np.random.randint(0, width)
+            y = np.random.randint(0, height)
+
+            # 点本身必须可用
+            if self.map_grid[y, x]:
+                continue
+
+            # 边界也要留足，不然圆形检查会越界
+            if (
+                x - clearance_pixels < 0 or x + clearance_pixels >= width or
+                y - clearance_pixels < 0 or y + clearance_pixels >= height
+            ):
+                continue
+
+            # 检查圆形邻域内是否有障碍物
+            is_clear = True
+            for dx in range(-clearance_pixels, clearance_pixels + 1):
+                for dy in range(-clearance_pixels, clearance_pixels + 1):
+                    if dx * dx + dy * dy <= clearance_pixels * clearance_pixels:
+                        nx, ny = x + dx, y + dy
+                        if self.map_grid[ny, nx]:
+                            is_clear = False
+                            break
+                if not is_clear:
+                    break
+
+            if is_clear:
+                return x, y
