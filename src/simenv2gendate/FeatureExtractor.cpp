@@ -26,13 +26,14 @@ EnvironmentFeatures FeatureExtractor::extractFeatures(const LidarData& lidar) {
         int end_idx = std::min((i + 1) * sector_size, num_beams); // 当前扇区的最后一个扫描点
         
         for (int j = start_idx; j < end_idx; ++j) {
+            // std::cout << " lidar.ranges[" << j << "]: " << lidar.ranges[j] << std::endl;
             if (lidar.ranges[j] < lidar.max_range) {
                 min_dist = std::min(min_dist, lidar.ranges[j]);
                 sum_dist += lidar.ranges[j];
                 count++;
             }
         }
-        
+        // std::cout << "扇区 " << i << " 的最小值: " << min_dist << std::endl;
         features.sector_min_dists[i] = (min_dist < lidar.max_range) ? min_dist : lidar.max_range; // 当前扇区的最小距离
         features.sector_avg_dists[i] = (count > 0) ? (sum_dist / count) : lidar.max_range; // 当前扇区的平均距离
         // if(i==7) std::cout << "7号扇区的平均距离：" << features.sector_avg_dists[i] << std::endl;
@@ -44,6 +45,8 @@ EnvironmentFeatures FeatureExtractor::extractFeatures(const LidarData& lidar) {
     features.left_clearance = std::min(features.sector_min_dists[5], features.sector_min_dists[6]); // 左侧最小距离
     features.right_clearance = std::min(features.sector_min_dists[1], features.sector_min_dists[2]); // 右侧最小距离
     features.corridor_width = features.sector_min_dists[1] + features.sector_min_dists[6]; // 通道宽度
+
+    // std::cout << " corridor_width: " << features.corridor_width << std::endl;
     
     // 计算障碍物密度（只检测的是30%范围内的障碍物，可根据训练情况调整）
     int close_count = 0;

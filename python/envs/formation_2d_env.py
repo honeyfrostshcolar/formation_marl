@@ -3,50 +3,66 @@ import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
 import formation_core 
-from envs.reward_fn import FormationReward
+from envs.reward_fn import MADDPGFormationReward
 import os
 from PIL import Image
 from collections import deque
+from envs.reward_fn import MADDPGFormationReward
 
-class Formation2DEnv(gym.Env):
+# ✅ 1. 导入 RLlib 的多智能体环境基类
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
+
+# ✅ 2. 继承 MultiAgentEnv 而不是 gym.Env
+class Formation2DMultiAgentEnv(MultiAgentEnv):
     def __init__(self, config):
         super().__init__()
-        self.num_robots = config.get("num_robots", 3)
+        self.num_robots = config.get("num_robots", 5) # 默认 5 个机器人
         self.num_followers = self.num_robots - 1
+        
+        # 即使现在我们只有 4 个跟随者，为了适应未来的泛化，我们可以预留最大容量
         self.max_robots = config.get("max_robots", 10)
         self.max_followers = self.max_robots - 1
-        self.max_steps = config.get("max_steps", 100)
+        
+        self.max_steps = config.get("max_steps", 200)
         self.radar_rays = config.get("radar_rays", 180)
         self.safety_threshold = config.get("safety_threshold", 0.5)
-        self.max_comm_distance = config.get("max_comm_distance", 5.0)
-        self.candidate_graphs = config.get("candidate_graphs", [])
 
-        # ==========================================
-        # ✅ 新增：地图相关配置
-        # ==========================================
-        self.map_resolution = 0.1  # 地图分辨率：每个像素代表 0.1 米
-        self.map_origin = np.array([0.0, 0.0])  # 物理坐标系的原点 (x, y) 对应地图的中心
-        self.map_grid = self._load_or_generate_map() # 获取二维数组地图 (True=障碍, False=空地)
+        # ✅ 3. 定义多智能体的 ID 列表 (例如: ['follower_0', 'follower_1', ...])
+        self._agent_ids = [f"follower_{i}" for i in range(self.num_followers)]
 
-        self.planning_safe_margin = 0.8  # 设置距离障碍物 0.8 米的安全冗余
+        self.map_resolution = 0.1
+        self.map_origin = np.array([0.0, 0.0])
+        self.map_grid = self._load_or_generate_map()
+        self.planning_safe_margin = 1.0 # 膨胀层的安全边距 (米)，根据实际情况调整
         self.inflated_map_grid = self._inflate_map(self.map_grid, self.planning_safe_margin)
+
+        self.sensing_radius = config.get("sensing_radius", 5.0)  # 最大感知半径 (米)
+        self.max_visible_teammates = 3  # 网络最多只管最近的 3 个兄弟
         
-        self.reward_fn = FormationReward()
+        self.reward_fn = MADDPGFormationReward()
+        # 密码本，用于记录网络视野槽位对应的真实全局ID
+        self.obs_mapping = {i: [] for i in range(self.num_followers)}
+        
         self.leader_velocity = [0.0, 0.1]  
         self.leader_pos = np.array([0.0, 0.0], dtype=np.float32)
         self.follower_pos = np.random.uniform(-1, 1, size=(self.num_followers, 2)).astype(np.float32)
 
-        self.action_space = spaces.Dict({
-            "graph_idx": spaces.Discrete(len(self.candidate_graphs)),
-            "positions": spaces.Box(
-                low=-1.0, high=1.0, 
-                shape=(self.max_followers * 2,),
-                dtype=np.float32
-            )
-        })
+        # ==========================================
+        # ✅ 4. 彻底重构动作与状态空间 (针对单个智能体)
+        # ==========================================
+        # 动作空间：极其干净！就只有 X 和 Y 方向的相对位置指令
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, 
+            shape=(2,), 
+            dtype=np.float32
+        )
         
+        # 维度 = 自己的雷达(21) + 老大的位置(2) + 最多3个兄弟的信息(3 * 3)
+        # 兄弟信息为什么是 3 维？因为除了相对位移 (dx, dy)，我们还需要一个标志位 (is_valid)
+        # 来告诉网络“这个槽位是不是真实存在的兄弟”（防止填 0 时被网络误认为是坐标原点的兄弟）
+        obs_dim = 21 + 2 + (self.max_visible_teammates * 3)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(21,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
 
         self.render_mode = config.get("render", False)
@@ -57,65 +73,49 @@ class Formation2DEnv(gym.Env):
         self.step_count = 0
 
     def _load_or_generate_map(self):
-        """加载 PGM 占据栅格地图，如果没有则生成一个默认的复杂地图"""
-        map_path = "map.pgm"  # ✅ 改为你的 pgm 文件名
+        map_path = "/home/nankai/formation_test/maps/underground_garage5.pgm"
         if os.path.exists(map_path):
-            print(f"Loading ROS standard PGM map from {map_path}...")
-            # PIL 原生支持 PGM 读取
+            print(f"✅ 加载地图成功: {map_path}")
             img = Image.open(map_path).convert('L') 
-            
-            # 将图像转为 Numpy 数组
-            # 设定阈值：只要像素值小于 250 (包含黑色障碍物和灰色未知区域)，就视为不可通行的 True
             grid = np.array(img) < 250 
             return grid
         else:
-            print(f"No {map_path} found, generating default procedural map...")
-            # 生成一个 200x200 像素的默认地图 (对应物理尺寸 20米 x 20米)
+            print("❌ 地图文件不存在，生成默认地图")
             grid = np.zeros((200, 200), dtype=bool) 
-            
-            # 增加四周墙壁
-            grid[0:5, :] = True; grid[-5:, :] = True
-            grid[:, 0:5] = True; grid[:, -5:] = True
-            
-            # 默认的障碍物块
-            grid[100:120, 0:80] = True
-            grid[130:150, 120:200] = True
-            grid[160:170, 90:110] = True
+            grid[0:5, :] = False; grid[-5:, :] = False
+            grid[:, 0:5] = False; grid[:, -5:] = False
+            grid[100:130, 0:95] = False
+            grid[100:140, 120:200] = False
+            grid[160:170, 90:110] = False
             return grid
 
     def _world_to_grid(self, x, y):
-        """物理坐标 (米) 转换为 像素索引"""
-        # 假设 (0,0) 米在地图的正中心
         height, width = self.map_grid.shape
         pixel_x = int(x / self.map_resolution + width / 2)
         pixel_y = int(y / self.map_resolution + height / 2)
         return pixel_x, pixel_y
 
     def _is_obstacle(self, x, y):
-        """检查某个物理坐标是否是障碍物"""
         px, py = self._world_to_grid(x, y)
         height, width = self.map_grid.shape
         if 0 <= px < width and 0 <= py < height:
             return self.map_grid[py, px]
-        return True # 超出地图边界视为障碍物
+        return True
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
             np.random.seed(seed)
             
-        # ✅ 1. 随机生成起点和终点，并规划路径
         while True:
             start_idx = self._get_random_free_point()
+            # world_start = self._grid_to_world(*start_idx)
+            # print("World start:", world_start)
             goal_idx = self._get_random_free_point()
             path_indices = self._plan_path(start_idx, goal_idx)
-            # 确保生成的路径足够长，否则重新生成
             if len(path_indices) > 10: 
                 break
                 
-        # ✅ 2. 把像素路径点转化为物理坐标点
         self.path = [self._grid_to_world(px, py) for px, py in path_indices]
-        
-        # ✅ 3. 初始化领航者位置在起点
         self.leader_pos = self.path.pop(0)
 
         self.leader_yaw = 0.0
@@ -123,254 +123,347 @@ class Formation2DEnv(gym.Env):
             direction = self.path[0] - self.leader_pos
             self.leader_yaw = np.arctan2(direction[1], direction[0])
 
-        self.follower_pos = np.random.uniform(-1, 1, size=(self.num_followers, 2)).astype(np.float32)
-        self.follower_pos += self.leader_pos 
-
+        self.follower_pos = np.zeros((self.num_followers, 2), dtype=np.float32)
         
+        for i in range(self.num_followers):
+            valid_spawn = False
+            attempts = 0
+            while not valid_spawn and attempts < 100:
+                # 在老大周围 2 米的圆环内随机找个点
+                angle = np.random.uniform(-np.pi, np.pi)
+                radius = np.random.uniform(0.5, 2.0)
+                candidate_pos = self.leader_pos + np.array([np.cos(angle), np.sin(angle)]) * radius
+                
+                # 1. 检查是否在墙里（使用膨胀地图保证绝对安全）
+                px, py = self._world_to_grid(candidate_pos[0], candidate_pos[1])
+                if 0 <= px < self.inflated_map_grid.shape[1] and 0 <= py < self.inflated_map_grid.shape[0]:
+                    if not self.inflated_map_grid[py, px]:  # 如果不在障碍物膨胀区内
+                        
+                        # 2. 检查和其他已经生成的小弟是否重叠
+                        too_close = False
+                        for j in range(i):
+                            dist = np.linalg.norm(candidate_pos - self.follower_pos[j])
+                            if dist < self.safety_threshold * 1.5: # 保证比最小距离还要宽裕一点
+                                too_close = True
+                                break
+                                
+                        if not too_close:
+                            self.follower_pos[i] = candidate_pos
+                            valid_spawn = True
+                            
+                attempts += 1
+                
+            if not valid_spawn:
+                # 极端情况：如果尝试了100次都没找到好位置（比如走廊太窄）
+                # 就强行排在老大正后方的一条直线上
+                fallback_direction = -np.array([np.cos(self.leader_yaw), np.sin(self.leader_yaw)])
+                self.follower_pos[i] = self.leader_pos + fallback_direction * (i + 1) * 0.5
         
         self.step_count = 0
-        obs = self._get_leader_observation()
+        self.prev_follower_pos = self.follower_pos.copy()
+
+        # ✅ 5. 循环构建所有小弟的初始观测字典
+        obs_dict = {}
+        for i, agent_id in enumerate(self._agent_ids):
+            obs_dict[agent_id] = self._get_single_follower_obs(i)
+
         if self.render_mode:
             self.render()
 
-        self.prev_follower_pos = self.follower_pos.copy()
-        self.prev_graph_idx = None
+        return obs_dict, {}
 
-        return obs, {}
+    def step(self, action_dict, graph_dict, graphs_soft_dict):
+        """
+        ✅ 6. 核心步进函数改造，接收动作字典
+        action_dict 格式: {"follower_0": [dx, dy], "follower_1": [dx, dy], ...}
 
-    def step(self, action):
-        done = False
-        graph_idx = action["graph_idx"]
-        action_graph = self.candidate_graphs[graph_idx]
-
-        # 1. 判断拓扑图是否发生切换
-        is_graph_changed = False
-        if hasattr(self, 'prev_graph_idx') and self.prev_graph_idx is not None:
-            is_graph_changed = (graph_idx != self.prev_graph_idx)
-        self.prev_graph_idx = graph_idx
-
+        """
+        # ==========================================
+        # 1. 领航者按预设轨迹移动 (与原来一样)
+        # ==========================================
+        leader_done = False
         if len(self.path) > 0:
             target_pos = self.path[0]
             direction = target_pos - self.leader_pos
             distance_to_target = np.linalg.norm(direction)
-            move_step = 0.1  # 领航者的移动步长 (速度)
-            
+            move_step = 0.1
             if distance_to_target < move_step:
-                # 如果离目标点很近了，直接踩上去，并把这个路径点从列表中剔除
                 self.leader_pos = target_pos
                 self.path.pop(0)
             else:
-                # 否则，朝着目标点方向走一步
                 self.leader_pos += (direction / distance_to_target) * move_step
                 self.leader_yaw = np.arctan2(direction[1], direction[0])
         else:
-            # 路径走完了，可以提前结束回合或者原地等待
-            done = True
+            leader_done = True
 
-        pos_action = action["positions"]
-        active_pos_action = pos_action[:self.num_followers * 2] 
-        local_rel = active_pos_action.reshape(self.num_followers, 2) * 2.0
-        
+        # ==========================================
+        # 2. 跟随者根据动作字典各自移动
+        # ==========================================
         cos_yaw = np.cos(self.leader_yaw)
         sin_yaw = np.sin(self.leader_yaw)
         
-        global_rel = np.zeros_like(local_rel)
-        # 假设动作的 local_rel[:, 0] 是沿着车头方向(X)，local_rel[:, 1] 是垂直于车头方向(Y)
-        global_rel[:, 0] = local_rel[:, 0] * cos_yaw - local_rel[:, 1] * sin_yaw
-        global_rel[:, 1] = local_rel[:, 0] * sin_yaw + local_rel[:, 1] * cos_yaw
-        
-        self.follower_pos = self.leader_pos + global_rel
+        for i, agent_id in enumerate(self._agent_ids):
+            # 如果某个智能体挂了或者没给出动作，保持原地或采取默认动作
+            if agent_id not in action_dict:
+                continue
+                
+            local_action = np.array(action_dict[agent_id]) * 1.0 # 还原范围
+            
+            # 从局部坐标（相对于老大的车头）转为全局相对坐标
+            global_dx = local_action[0] * cos_yaw - local_action[1] * sin_yaw
+            global_dy = local_action[0] * sin_yaw + local_action[1] * cos_yaw
+            
+            # 更新该机器人的物理绝对坐标
+            self.follower_pos[i] = self.leader_pos + np.array([global_dx, global_dy])
+
+        self.step_count += 1
+        is_timeout = self.step_count >= self.max_steps # 超时结束
+
+        # ✅ 3. 新增翻译官逻辑：根据 graph_dict 和密码本，生成全局连线列表
+        # TODO：这里有很大问题，如果is_valid是0，说明这个槽位没有兄弟了，
+        # 那么我们就不应该让网络学会把这个槽位当成坐标原点的兄弟，所以在计算奖励时，如果is_valid是0，
+        # 就直接跳过这个槽位，不管它的坐标是什么值（包括0）。同样的，如果is_valid是1，我们才让网络学会把这个坐标当成一个真实兄弟的位置来计算奖励。
+        dynamic_connections = {}
+        for i, agent_id in enumerate(self._agent_ids):
+            global_follower_id = i + 1
+            dynamic_connections[global_follower_id] = []
+            
+            if agent_id in graph_dict:
+                hard_weights = graph_dict[agent_id] # 网络吐出的比如 [1, 0, 0]
+                soft_weights = np.array(graphs_soft_dict[agent_id]).flatten() # 软权重，比如 [0.7, 0.2, 0.1]
+                # print(f"Agent {agent_id} hard_weights: {hard_weights}, soft_weights: {soft_weights}")
+                mapping = self.obs_mapping[i]       # 密码本记录的比如 [0, 3, 4]
+                
+                for k in range(len(mapping)):
+                    # 只有当硬权重为 1（真正建立了连接）时，我们才计算它的弹性惩罚
+                    if hard_weights[k] > 0:
+                        target_global_id = mapping[k]
+                        current_soft_weight = soft_weights[k]
+                        
+                        # 打包成元组 (target_global_id, current_soft_weight) 追加进去
+                        dynamic_connections[global_follower_id].append((target_global_id, current_soft_weight))
 
         positions_3d = np.zeros((self.num_robots, 3), dtype=np.float32)
         positions_3d[0, :2] = self.leader_pos
         positions_3d[1:, :2] = self.follower_pos
 
-        prev_positions_3d = np.zeros((self.num_robots, 3), dtype=np.float32)
-        prev_positions_3d[0, :2] = self.leader_pos # 领航者历史位置不影响跟随者相对计算
-        prev_positions_3d[1:, :2] = getattr(self, 'prev_follower_pos', self.follower_pos)
-
-        # ✅ 3. 检测危险区 (Inflated Map)
         in_danger_zone = []
+        in_crash_zone = []
         for i in range(self.num_robots):
             pos = positions_3d[i, :2]
             px, py = self._world_to_grid(pos[0], pos[1])
             if 0 <= px < self.inflated_map_grid.shape[1] and 0 <= py < self.inflated_map_grid.shape[0]:
                 in_danger_zone.append(bool(self.inflated_map_grid[py, px]))
+                in_crash_zone.append(bool(self.map_grid[py, px]))
             else:
-                in_danger_zone.append(True) # 越界也是危险区
+                in_danger_zone.append(True)
+                in_crash_zone.append(True)
 
-        # ✅ 4. 调用全新的终极奖励函数
-        reward, reward_details = self.reward_fn.compute(
-            positions_3d, prev_positions_3d, action_graph, 
-            is_graph_changed, self.leader_yaw, in_danger_zone
+        # print("in_crash_zone:", in_crash_zone)
+
+        leader_lidar = self._simulate_radar(self.leader_pos)
+        feature_extractor = formation_core.FeatureExtractor(8)
+        leader_features = feature_extractor.extract_features(leader_lidar)
+        current_corridor_width = leader_features.corridor_width
+
+        # ✅ 4. 把翻译好的连线扔给裁判！
+        team_reward, reward_details = self.reward_fn.compute(
+            leader_pos=self.leader_pos,
+            follower_positions=self.follower_pos,
+            prev_follower_positions=self.prev_follower_pos,
+            leader_yaw=self.leader_yaw,
+            in_danger_zone=in_danger_zone, # 传入每个智能体是否在危险区的信息(指的是inflated_map_grid)
+            in_crash_zone=in_crash_zone, # 传入每个智能体是否在撞击区的信息(指的是map_grid)
+            dynamic_connections=dynamic_connections, # 传入动态图！
+            corridor_width=current_corridor_width # 传入当前走廊宽度，方便奖励函数设计更复杂的几何形状奖励
         )
 
-        # 更新记忆，供下一帧使用
+        # ==========================================
+        # 3. 计算每个智能体的观测、奖励和结束状态
+        # ==========================================
+        obs_dict = {}
+        reward_dict = {}
+        terminated_dict = {}
+        truncated_dict = {}
+        info_dict = {}
+
+        # 如果任何一个小弟撞墙了，或者老大到终点了，这局就结束
+        any_follower_crashed = any(in_crash_zone[1:])
+        # print("any_follower_crashed:", any_follower_crashed)
+        episode_done = leader_done or any_follower_crashed
+        # episode_done = leader_done
+
+        for i, agent_id in enumerate(self._agent_ids): #agenr_ids指的就是跟随者的ID列表
+            obs_dict[agent_id] = self._get_single_follower_obs(i)
+            # print(f"obs_dict[{agent_id}]:", obs_dict[agent_id])
+            # 所有人吃大锅饭：拿到完全一样的团队总分！
+            reward_dict[agent_id] = team_reward 
+            terminated_dict[agent_id] = episode_done
+            truncated_dict[agent_id] = is_timeout
+            info_dict[agent_id] = reward_details # 把扣分明细传出去，方便你写日志
+
+        terminated_dict["__all__"] = episode_done
+        truncated_dict["__all__"] = is_timeout
+
         self.prev_follower_pos = self.follower_pos.copy()
-
-        self.step_count += 1
-        # done = self.step_count >= self.max_steps
-
-        # ==========================================
-        # ✅ 更新：严格的碰撞检测（机器人互碰 + 撞墙）
-        # ==========================================
-        # 1. 检测机器人间互撞
-        for i in range(self.num_followers):
-            for j in range(i+1, self.num_followers):
-                dist = np.linalg.norm(self.follower_pos[i] - self.follower_pos[j])
-                if dist < self.safety_threshold:
-                    reward -= 5.0
-                    
-        # 2. 检测撞墙 (所有真实机器人)
-        for i in range(self.num_robots):
-            pos = positions_3d[i, :2]
-            if self._is_obstacle(pos[0], pos[1]):
-                reward -= 10.0 # 严厉的撞墙惩罚！
-                done = True
-
-        obs = self._get_leader_observation()
-        info = {
-            "reward_details": reward_details,
-            "leader_pos": self.leader_pos.copy(),
-            "follower_positions": self.follower_pos.copy(),
-            "chosen_graph": int(graph_idx)
-        }
 
         if self.render_mode:
             self.render()
-        return obs, float(reward), done, False, info
 
-    def _get_leader_observation(self):
-        obs = np.zeros(21, dtype=np.float32)
-        lidar_data = self._simulate_radar(self.leader_pos)
+        return obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict
+
+    def _get_single_follower_obs(self, follower_idx):
+        my_pos = self.follower_pos[follower_idx] # 当前这个小弟的绝对坐标
+        
+        # 1. 算雷达 (保持不变)
+        lidar_data = self._simulate_radar(my_pos)
         feature_extractor = formation_core.FeatureExtractor(8)
         features = feature_extractor.extract_features(lidar_data)
+        
+        lidar_obs = np.zeros(21, dtype=np.float32)
+        lidar_obs[0] = features.corridor_width 
+        lidar_obs[1] = features.front_clearance
+        lidar_obs[2] = features.left_clearance  
+        lidar_obs[3] = features.right_clearance 
+        lidar_obs[4] = features.obstacle_density  
+        lidar_obs[5:13] = np.array(features.sector_min_dists, dtype=np.float32)
+        lidar_obs[13:21] = np.array(features.sector_avg_dists, dtype=np.float32)
 
-        obs[0] = features.corridor_width 
-        obs[1] = features.front_clearance
-        obs[2] = features.left_clearance  
-        obs[3] = features.right_clearance 
-        obs[4] = features.obstacle_density  
+        lidar_obs = np.round(lidar_obs, 1)
 
-        min_dists = np.array(features.sector_min_dists, dtype=np.float32)
-        avg_dists = np.array(features.sector_avg_dists, dtype=np.float32)
-        obs[4:12] = min_dists  
-        obs[13:21] = avg_dists 
+        # print("lidar_obs:", lidar_obs)
+
+        # 坐标转换函数：将全局向量转为老大的局部坐标系
+        cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
+        def global_to_local(vec):
+            return np.array([
+                vec[0] * cos_y + vec[1] * sin_y,
+                -vec[0] * sin_y + vec[1] * cos_y
+            ], dtype=np.float32)
+
+        # 2. 算老大的相对位置 (转为局部)
+        leader_rel_global = self.leader_pos - my_pos # 全局坐标差
+        leader_rel = global_to_local(leader_rel_global) # 转为老大局部坐标系下的相对位置
+        
+        # ==========================================
+        # ✅ 3. 核心升级：KNN + 感知半径 过滤兄弟
+        # ==========================================
+        # ✅ 核心升级：把老大和其他小弟，统一放进“感知候选池”里
+        entities = []
+        
+        # 1. 考察老大 (Global ID: 0)
+        dist_to_leader = np.linalg.norm(leader_rel_global)
+        if dist_to_leader <= self.sensing_radius:
+            entities.append({'dist': dist_to_leader, 'rel_pos': leader_rel, 'global_id': 0})
+            
+        # 2. 考察其他兄弟 (Global ID: j + 1)
+        for j in range(self.num_followers):
+            if j != follower_idx:
+                rel_global = self.follower_pos[j] - my_pos
+                dist = np.linalg.norm(rel_global)
+                if dist <= self.sensing_radius:
+                    entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global), 'global_id': j + 1})
+
+        # 排序并截取最近的 3 个
+        entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates] # 最近范围内的3个兄弟（可能有老大）
+        # 这里可能会有疑惑，就是如果不够3人，entities最后不满3个，会不会报错，其实不会，因为teammates_obs
+        # 在填充观测数组时，是按照3的实际长度来填的，不够的部分默认就是0了（相当于无效槽位），
+        # 而我们用is_valid来标记有效数据，所以网络学会了如果这个槽位是0，就不理它。
+        
+        # ✅ 记录翻译密码本：这 3 个槽位分别是谁？
+        self.obs_mapping[follower_idx] = [e['global_id'] for e in entities]
+
+        # 填充到观测数组里喂给网络
+        teammates_obs = np.zeros((self.max_visible_teammates * 3), dtype=np.float32)
+        for i, e in enumerate(entities):
+            idx = i * 3
+            # TODO: 其实这里可以直接改成绝对位置。self.follower_pos。
+            teammates_obs[idx] = e['rel_pos'][0]
+            teammates_obs[idx+1] = e['rel_pos'][1]
+            teammates_obs[idx+2] = 1.0 # 真实存在的标记
+            
+        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs])
         return obs
 
     def _simulate_radar(self, origin_pos):
-        """
-        ✅ 更新：基于占据栅格地图的真实射线步进算法 (Ray Casting)
-        """
-        num_rays = self.radar_rays # 180条射线覆盖 360 度
+        num_rays = self.radar_rays # 180
         max_distance = 10.0
-        step_size = self.map_resolution # 步长与像素大小一致0.1
+        step_size = self.map_resolution # 0.1
         
         lidar_data = formation_core.LidarData(num_rays, max_distance)
-        lidar_data.max_range = max_distance
-        lidar_data.num_beams = num_rays
+        angle_list = []
+        range_list = []
         
         for i in range(num_rays):
-            angle = self.leader_yaw + (2 * np.pi * i / num_rays)
-            lidar_data.angles.append(angle)
+            angle = self.leader_yaw + (2 * np.pi * i / num_rays) # 假设雷达朝向跟老大一致
+            angle_list.append(angle)
             
             dx = np.cos(angle)
             dy = np.sin(angle)
             
-            # 射线步进检测
             hit_distance = max_distance
             for r in np.arange(0, max_distance, step_size):
                 test_x = origin_pos[0] + r * dx
                 test_y = origin_pos[1] + r * dy
                 if self._is_obstacle(test_x, test_y):
-                    hit_distance = r
-                    break # 遇到障碍物，结束当前射线的检测
+                    hit_distance = round(r, 1)
+                    # print("hit_distance:", hit_distance)
+                    break
                     
-            lidar_data.ranges.append(hit_distance)
+            range_list.append(hit_distance)
+
+        lidar_data.angles = angle_list
+        lidar_data.ranges = range_list
+
+        # print("lidar_data.ranges:", lidar_data.ranges)
             
         return lidar_data
 
+    # ==========================================
+    # 以下绘图和路径规划辅助函数基本保持不变
+    # ==========================================
     def render(self, mode='human'):
         if not self.render_mode:
             return
-        
-        # 1. 彻底清除上一帧的绘图内容，防止多帧叠加产生残影
         self.ax.clear()
         
-        # ==========================================
-        # ✅ 核心升级：构建分层 Costmap 可视化背景
-        # ==========================================
-        # 获取地图尺寸和物理边界 (extent)
         height, width = self.map_grid.shape
         extent = [-width/2 * self.map_resolution, width/2 * self.map_resolution,
                 -height/2 * self.map_resolution, height/2 * self.map_resolution]
 
-        # 创建一张用于显示的彩色底图 grid (默认全白 1.0)
-        # 形状为 (height, width)，数据类型为 float，方便表示灰度
         display_grid = np.ones((height, width), dtype=np.float32)
-
-        # 逻辑层 1：将膨胀区域 (inflated_map_grid) 涂成浅灰色 (0.75)
-        # inflated_map_grid 包括了真实障碍物及其四周，所以这一步是把整个不可规划区变灰
         display_grid[self.inflated_map_grid] = 0.75
-
-        # 逻辑层 2：将真实的障碍物 (map_grid) 涂成纯黑色 (0.0)
-        # 这一步会覆盖掉灰色层中属于真实墙壁的部分
         display_grid[self.map_grid] = 0.0
 
-        # 使用 imshow 显示合成后的三色代价地图
-        # origin='lower' 确保数学坐标系与图片坐标系一致
-        # cmap='Greys' 映射：0.0->黑，0.75->灰，1.0->白
-        # vmin/vmax 定死颜色映射范围，防止自动调整导致灰色不统一
         self.ax.imshow(display_grid, extent=extent, origin='lower', 
                     cmap='Greys', alpha=0.6, vmin=0.0, vmax=1.0)
         
-        # ==========================================
-        # ✅ 2. 绘制规划路径 (黄色虚线)
-        # ==========================================
-        # 加上 linewidth 增强可视性
         if hasattr(self, 'path') and len(self.path) > 0:
             self.ax.plot([p[0] for p in self.path], [p[1] for p in self.path], 
                         'y--', alpha=0.8, linewidth=2, label='Global Path')
 
-        # ✅ 3. 设置坐标轴范围和物理比例
         self.ax.set_xlim(extent[0], extent[1])
         self.ax.set_ylim(extent[2], extent[3])
-        self.ax.set_aspect('equal') # 极其重要：保证 1米:1米 的真实物理比例
+        self.ax.set_aspect('equal')
 
-        # ✅ 4. 绘制编队中的机器人
-        # 绘制领航者（红色大圆点）
         self.ax.plot(self.leader_pos[0], self.leader_pos[1], 'ro', markersize=12, label='Leader')
         
-        # ✅ 新增：为领航者添加前进朝向箭头 (以车头为基准，X-Forward)
-        # 箭头长度可以根据需要调整，例如 0.8 米
         arrow_length = 0.8
-        # 箭头向量 dx, dy：基于 leader_yaw 计算
         dx = arrow_length * np.cos(self.leader_yaw)
         dy = arrow_length * np.sin(self.leader_yaw)
-        
-        # 使用 ax.arrow 绘制
-        # (x, y) 为起点，(dx, dy) 为向量
         self.ax.arrow(self.leader_pos[0], self.leader_pos[1], dx, dy,
                     head_width=0.3, head_length=0.4, fc='r', ec='r', alpha=0.8)
         
-        # 绘制跟随者（蓝色小圆点）
         for pos in self.follower_pos:
             self.ax.plot(pos[0], pos[1], 'bo', markersize=8)
             
-        # 绘制拓扑连线，加上 alpha 防止遮挡障碍物细节
+        # TODO: 由于环境不再直接接收控制图了，我们暂时画星型图，等 G2ANet 引入后再动态画线
         for pos in self.follower_pos:
             self.ax.plot([self.leader_pos[0], pos[0]],
                         [self.leader_pos[1], pos[1]], 'k-', alpha=0.5, linewidth=1.5)
 
-        # ✅ 5. 加上网格和标题
         self.ax.grid(True, linestyle='--', alpha=0.3)
-        # 标题增加朝向指示的说明
-        self.ax.set_title(f'Formation 2D Env | X-Forward (ROS Standard) | Leader Heading')
-        
-        # 如果提供了 label，显示图例
-        # self.ax.legend(loc='upper right', fontsize='small')
-
-        # 刷新 matplotlib 窗口
+        self.ax.set_title(f'MARL Formation 2D Env | Step: {self.step_count}')
         plt.pause(0.01)
 
     def close(self):
@@ -378,19 +471,16 @@ class Formation2DEnv(gym.Env):
             plt.close(self.fig)
 
     def _get_random_free_point(self):
-        """在地图上随机寻找一个没有障碍物的空地"""
         height, width = self.inflated_map_grid.shape
         while True:
             x = np.random.randint(0, width)
             y = np.random.randint(0, height)
-            if not self.inflated_map_grid[y, x]: # 如果是 False (空地)
+            if not self.inflated_map_grid[y, x]:
                 return x, y
 
     def _plan_path(self, start_idx, goal_idx):
-        """使用 BFS 算法在占据栅格地图上规划最短路径"""
         queue = deque([(start_idx, [start_idx])])
         visited = set([start_idx])
-        # 允许 8 邻域移动 (包含斜向)
         directions = [(0,1), (1,0), (0,-1), (-1,0), (1,1), (-1,-1), (1,-1), (-1,1)]
         
         while queue:
@@ -400,32 +490,24 @@ class Formation2DEnv(gym.Env):
             
             for dx, dy in directions:
                 nx, ny = current[0] + dx, current[1] + dy
-                # 检查边界和碰撞
                 if 0 <= nx < self.inflated_map_grid.shape[1] and 0 <= ny < self.inflated_map_grid.shape[0]:
                     if not self.inflated_map_grid[ny, nx] and (nx, ny) not in visited:
                         visited.add((nx, ny))
                         queue.append(((nx, ny), path + [(nx, ny)]))
-        return [] # 如果找不到路，返回空
+        return []
         
     def _grid_to_world(self, px, py):
-        """像素索引 转换为 物理坐标 (米)"""
         height, width = self.map_grid.shape
         x = (px - width / 2) * self.map_resolution
         y = (py - height / 2) * self.map_resolution
         return np.array([x, y], dtype=np.float32)
     
     def _inflate_map(self, grid, margin_meters):
-        """将地图上的障碍物膨胀一定半径，生成专用的安全规划地图"""
         from scipy.ndimage import binary_dilation
-        
         inflation_pixels = int(margin_meters / self.map_resolution)
         if inflation_pixels <= 0:
             return grid.copy()
-            
-        # 创建一个圆形的膨胀核 (保证四面八方的安全距离都一致)
         y, x = np.ogrid[-inflation_pixels:inflation_pixels+1, -inflation_pixels:inflation_pixels+1]
         kernel = x**2 + y**2 <= inflation_pixels**2
-        
-        # 使用 scipy 进行二值膨胀：只要靠近障碍物 inflation_pixels 个像素内的区域，全变成 True (不可通行)
         inflated_grid = binary_dilation(grid, structure=kernel)
         return inflated_grid
