@@ -49,13 +49,13 @@ def main():
     # ==========================================
     # 1. 训练参数与工程目录设置
     # ==========================================
-    train_iterations = 1000 
-    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
+    train_iterations = 20000
+    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_xxxxxx_2026.../latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_826efe_2026-03-15_18-23-18/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -75,8 +75,8 @@ def main():
     # ==========================================
     config = {
         "num_robots": 5, 
-        "max_steps": 200, 
-        "render": True,  # ⚠️ 训练时必须关闭渲染以保证速度！
+        "max_steps": 500, 
+        "render": False,  # ⚠️ 训练时必须关闭渲染以保证速度！
         "sensing_radius": 5.0
     }
     env = Formation2DMultiAgentEnv(config)
@@ -95,7 +95,7 @@ def main():
         action_dim=action_dim, 
         device=device
     )
-    batch_size = 128 # 每次更新的批量大小
+    batch_size = 256 # 每次更新的批量大小
 
     # ==========================================
     # 3. 执行断点续训加载逻辑
@@ -105,6 +105,7 @@ def main():
         if os.path.exists(resume_checkpoint):
             print(f"\n🔄 [恢复训练] 正在加载检查点：{resume_checkpoint}")
             start_episode = load_checkpoint(agent, resume_checkpoint)
+            buffer.load(resume_checkpoint) # 同步加载经验池状态
             print(f"✅ [恢复成功] 将从第 {start_episode} 轮继续训练！\n")
         else:
             print(f"\n⚠️ [警告] 检查点不存在：{resume_checkpoint}，从头开始训练！\n")
@@ -115,6 +116,15 @@ def main():
     # 4. 开始炼丹大循环
     # ==========================================
     for episode in range(start_episode, train_iterations):
+
+        if episode < 2000:
+            current_noise = 0.15
+        else:
+            progress = min(1.0, (episode - 2000) / 1000)
+            current_noise = 0.10 - progress * 0.09
+            current_noise = max(current_noise, 0.01)
+        
+
         obs_dict, _ = env.reset()
         obs_array = np.array([obs_dict[agent_id] for agent_id in agent_ids])
         
@@ -124,16 +134,19 @@ def main():
         
         for step in range(config["max_steps"]):
             # 前向决策
-            actions_array, graphs_array = agent.select_action(obs_array, add_noise=True)
+            actions_array, graphs_array, graphs_soft_array = agent.select_action(obs_array, add_noise=True, noise_scale=current_noise)
             action_dict = {agent_ids[i]: actions_array[i] for i in range(num_followers)}
             graph_dict = {agent_ids[i]: graphs_array[i] for i in range(num_followers)}
-            
+            graphs_soft_dict = {agent_ids[i]: graphs_soft_array[i] for i in range(num_followers)}
+
             # 环境步进
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict)
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict, graphs_soft_dict)
             next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in agent_ids])
             
             team_reward = reward_dict[agent_ids[0]]
+            # print("terminated_dict:", terminated_dict, "truncated_dict:", truncated_dict)
             team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
+            # print( "team_done:", team_done)
             
             # 存入经验池
             buffer.store(obs_array, actions_array, float(team_reward), next_obs_array, float(team_done))
@@ -155,26 +168,31 @@ def main():
         avg_a_loss = np.mean(episode_actor_loss) if episode_actor_loss else 0.0
         avg_c_loss = np.mean(episode_critic_loss) if episode_critic_loss else 0.0
 
+        step_avg_reward = episode_reward / (step + 1)
+
         # 控制台打印进度
-        print(f"Episode: {episode:5d} | Steps: {step+1:3d} | Reward: {episode_reward:8.2f} | A_Loss: {avg_a_loss:.4f} | C_Loss: {avg_c_loss:.4f}")
+        print(f"Episode: {episode:5d} | Steps: {step+1:3d} | Reward: {step_avg_reward:8.2f} | A_Loss: {avg_a_loss:.4f} | C_Loss: {avg_c_loss:.4f}")
         
         # ✅ TensorBoard 记录曲线
         writer.add_scalar("Training/Episode_Reward", episode_reward, episode)
         writer.add_scalar("Training/Episode_Length", step + 1, episode)
         writer.add_scalar("Loss/Actor_Loss", avg_a_loss, episode)
         writer.add_scalar("Loss/Critic_Loss", avg_c_loss, episode)
+        writer.add_scalar("Training/Avg_Step_Reward", step_avg_reward, episode)
 
         # ✅ 每 50 局保存一次检查点，并覆盖 latest_checkpoint
         if (episode + 1) % 50 == 0:
             if os.path.exists(fixed_checkpoint_dir):
                 shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
             save_checkpoint(agent, episode + 1, fixed_checkpoint_dir)
+            buffer.save(fixed_checkpoint_dir)
             print(f"💾 [Checkpoint 已更新] 最新模型 -> {fixed_checkpoint_dir}")
 
     # 训练彻底结束时保存最终模型
     if os.path.exists(fixed_checkpoint_dir):
         shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
     save_checkpoint(agent, train_iterations, fixed_checkpoint_dir)
+    buffer.save(fixed_checkpoint_dir)
     print(f"\n🎉 训练全部结束！最终模型保存在: {fixed_checkpoint_dir}")
     writer.close()
 

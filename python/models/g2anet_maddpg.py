@@ -76,7 +76,21 @@ class G2ANet_MADDPG_Actor(nn.Module):
         v = F.relu(self.v(h_teammates)) 
 
         score = torch.bmm(q, k.transpose(1, 2)) / np.sqrt(self.attention_dim)
+
+        score = score.masked_fill(valid_mask.unsqueeze(1) == 0, -1e9)
+
         soft_weight = F.softmax(score, dim=-1) 
+
+        teammates_dx_dy = teammates_obs[:, :, :2]
+        physical_dist = torch.norm(teammates_dx_dy, dim=-1) + 1e-6
+
+        distance_bias = torch.exp(-physical_dist) * valid_mask
+
+        phys_weights = distance_bias / (distance_bias.sum(dim=-1, keepdim=True) + 1e-6)
+        phys_weights = phys_weights.unsqueeze(1)
+
+        alpha = 0.2
+        soft_weight = (1 - alpha) * soft_weight + alpha * phys_weights
 
         # --- 信息融合 ---
         # GNN 的“消息传递与聚合

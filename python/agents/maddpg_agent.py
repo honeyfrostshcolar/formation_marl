@@ -24,7 +24,7 @@ class MADDPG_Agent:
         self.target_critic.load_state_dict(self.critic.state_dict()) # 初始权重同步
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic)
 
-    def select_action(self, obs_array, add_noise=True):
+    def select_action(self, obs_array, add_noise=True, noise_scale=0.15):
         """
         环境交互时调用 (分布式执行)
         obs_array: 形状 (num_followers, obs_dim)
@@ -38,13 +38,15 @@ class MADDPG_Agent:
         
         action = action_tensor.cpu().numpy()
         graphs = hard_weights.cpu().numpy()
+        graphs_soft = soft_weights.cpu().numpy()
+        
         
         # MADDPG 是确定性策略，必须手动加高斯噪声来探索环境
         if add_noise:
-            noise = np.random.normal(0, 0.15, size=action.shape) # 0.15是噪声方差，可调
+            noise = np.random.normal(0, noise_scale, size=action.shape) # noise_scale是噪声方差，可调
             action = np.clip(action + noise, -1.0, 1.0) # 保证动作不越界
             
-        return action, graphs
+        return action, graphs, graphs_soft
 
     def update(self, sample_batch):
         """
@@ -90,8 +92,9 @@ class MADDPG_Agent:
         critic_loss = F.mse_loss(current_q, target_q_val)
 
         # 反向传播更新 Critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        self.critic_optimizer.zero_grad() # 清空旧的梯度
+        critic_loss.backward() # 计算新的梯度
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0) # 梯度裁剪，防止爆炸
         self.critic_optimizer.step()
 
         # ------------------------------------
@@ -112,6 +115,7 @@ class MADDPG_Agent:
         # 反向传播更新 Actor (G2ANet 的权重就在这里被更新！)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0) # 梯度裁剪，防止爆炸
         self.actor_optimizer.step()
 
         # ------------------------------------

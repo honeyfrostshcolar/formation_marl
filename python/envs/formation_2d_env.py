@@ -73,17 +73,19 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.step_count = 0
 
     def _load_or_generate_map(self):
-        map_path = "/home/lpp/formation_test/maps/underground_garage.pgm"
+        map_path = "/home/nankai/formation_test/maps/underground_garage5.pgm"
         if os.path.exists(map_path):
+            print(f"✅ 加载地图成功: {map_path}")
             img = Image.open(map_path).convert('L') 
             grid = np.array(img) < 250 
             return grid
         else:
-            grid = np.zeros((200, 200), dtype=bool) 
+            print("❌ 地图文件不存在，生成默认地图")
+            grid = np.zeros((400, 400), dtype=bool) 
             grid[0:5, :] = True; grid[-5:, :] = True
             grid[:, 0:5] = True; grid[:, -5:] = True
-            grid[100:120, 0:80] = True
-            grid[130:150, 120:200] = True
+            grid[100:130, 0:95] = True
+            grid[100:140, 120:400] = True
             grid[160:170, 90:110] = True
             return grid
 
@@ -106,6 +108,8 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             
         while True:
             start_idx = self._get_random_free_point()
+            # world_start = self._grid_to_world(*start_idx)
+            # print("World start:", world_start)
             goal_idx = self._get_random_free_point()
             path_indices = self._plan_path(start_idx, goal_idx)
             if len(path_indices) > 10: 
@@ -119,8 +123,41 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             direction = self.path[0] - self.leader_pos
             self.leader_yaw = np.arctan2(direction[1], direction[0])
 
-        self.follower_pos = np.random.uniform(-1, 1, size=(self.num_followers, 2)).astype(np.float32)
-        self.follower_pos += self.leader_pos 
+        self.follower_pos = np.zeros((self.num_followers, 2), dtype=np.float32)
+        
+        for i in range(self.num_followers):
+            valid_spawn = False
+            attempts = 0
+            while not valid_spawn and attempts < 100:
+                # 在老大周围 2 米的圆环内随机找个点
+                angle = np.random.uniform(-np.pi, np.pi)
+                radius = np.random.uniform(0.5, 2.0)
+                candidate_pos = self.leader_pos + np.array([np.cos(angle), np.sin(angle)]) * radius
+                
+                # 1. 检查是否在墙里（使用膨胀地图保证绝对安全）
+                px, py = self._world_to_grid(candidate_pos[0], candidate_pos[1])
+                if 0 <= px < self.inflated_map_grid.shape[1] and 0 <= py < self.inflated_map_grid.shape[0]:
+                    if not self.inflated_map_grid[py, px]:  # 如果不在障碍物膨胀区内
+                        
+                        # 2. 检查和其他已经生成的小弟是否重叠
+                        too_close = False
+                        for j in range(i):
+                            dist = np.linalg.norm(candidate_pos - self.follower_pos[j])
+                            if dist < self.safety_threshold * 1.5: # 保证比最小距离还要宽裕一点
+                                too_close = True
+                                break
+                                
+                        if not too_close:
+                            self.follower_pos[i] = candidate_pos
+                            valid_spawn = True
+                            
+                attempts += 1
+                
+            if not valid_spawn:
+                # 极端情况：如果尝试了100次都没找到好位置（比如走廊太窄）
+                # 就强行排在老大正后方的一条直线上
+                fallback_direction = -np.array([np.cos(self.leader_yaw), np.sin(self.leader_yaw)])
+                self.follower_pos[i] = self.leader_pos + fallback_direction * (i + 1) * 0.5
         
         self.step_count = 0
         self.prev_follower_pos = self.follower_pos.copy()
@@ -135,7 +172,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         return obs_dict, {}
 
-    def step(self, action_dict, graph_dict):
+    def step(self, action_dict, graph_dict, graphs_soft_dict):
         """
         ✅ 6. 核心步进函数改造，接收动作字典
         action_dict 格式: {"follower_0": [dx, dy], "follower_1": [dx, dy], ...}
@@ -180,9 +217,12 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             self.follower_pos[i] = self.leader_pos + np.array([global_dx, global_dy])
 
         self.step_count += 1
-        is_timeout = self.step_count >= self.max_steps # 超时结束（没设计）
+        is_timeout = self.step_count >= self.max_steps # 超时结束
 
         # ✅ 3. 新增翻译官逻辑：根据 graph_dict 和密码本，生成全局连线列表
+        # TODO：这里有很大问题，如果is_valid是0，说明这个槽位没有兄弟了，
+        # 那么我们就不应该让网络学会把这个槽位当成坐标原点的兄弟，所以在计算奖励时，如果is_valid是0，
+        # 就直接跳过这个槽位，不管它的坐标是什么值（包括0）。同样的，如果is_valid是1，我们才让网络学会把这个坐标当成一个真实兄弟的位置来计算奖励。
         dynamic_connections = {}
         for i, agent_id in enumerate(self._agent_ids):
             global_follower_id = i + 1
@@ -190,25 +230,41 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             
             if agent_id in graph_dict:
                 hard_weights = graph_dict[agent_id] # 网络吐出的比如 [1, 0, 0]
+                soft_weights = np.array(graphs_soft_dict[agent_id]).flatten() # 软权重，比如 [0.7, 0.2, 0.1]
+                # print(f"Agent {agent_id} hard_weights: {hard_weights}, soft_weights: {soft_weights}")
                 mapping = self.obs_mapping[i]       # 密码本记录的比如 [0, 3, 4]
                 
-                for k, weight in enumerate(hard_weights):
-                    if k < len(mapping) and weight > 0:
+                for k in range(len(mapping)):
+                    # 只有当硬权重为 1（真正建立了连接）时，我们才计算它的弹性惩罚
+                    if hard_weights[k] > 0:
                         target_global_id = mapping[k]
-                        dynamic_connections[global_follower_id].append(target_global_id)
+                        current_soft_weight = soft_weights[k]
+                        
+                        # 打包成元组 (target_global_id, current_soft_weight) 追加进去
+                        dynamic_connections[global_follower_id].append((target_global_id, current_soft_weight))
 
         positions_3d = np.zeros((self.num_robots, 3), dtype=np.float32)
         positions_3d[0, :2] = self.leader_pos
         positions_3d[1:, :2] = self.follower_pos
 
         in_danger_zone = []
+        in_crash_zone = []
         for i in range(self.num_robots):
             pos = positions_3d[i, :2]
             px, py = self._world_to_grid(pos[0], pos[1])
             if 0 <= px < self.inflated_map_grid.shape[1] and 0 <= py < self.inflated_map_grid.shape[0]:
                 in_danger_zone.append(bool(self.inflated_map_grid[py, px]))
+                in_crash_zone.append(bool(self.map_grid[py, px]))
             else:
                 in_danger_zone.append(True)
+                in_crash_zone.append(True)
+
+        # print("in_crash_zone:", in_crash_zone)
+
+        leader_lidar = self._simulate_radar(self.leader_pos)
+        feature_extractor = formation_core.FeatureExtractor(8)
+        leader_features = feature_extractor.extract_features(leader_lidar)
+        current_corridor_width = leader_features.corridor_width
 
         # ✅ 4. 把翻译好的连线扔给裁判！
         team_reward, reward_details = self.reward_fn.compute(
@@ -216,8 +272,10 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             follower_positions=self.follower_pos,
             prev_follower_positions=self.prev_follower_pos,
             leader_yaw=self.leader_yaw,
-            in_danger_zone=in_danger_zone,
-            dynamic_connections=dynamic_connections # 传入动态图！
+            in_danger_zone=in_danger_zone, # 传入每个智能体是否在危险区的信息(指的是inflated_map_grid)
+            in_crash_zone=in_crash_zone, # 传入每个智能体是否在撞击区的信息(指的是map_grid)
+            dynamic_connections=dynamic_connections, # 传入动态图！
+            corridor_width=current_corridor_width # 传入当前走廊宽度，方便奖励函数设计更复杂的几何形状奖励
         )
 
         # ==========================================
@@ -230,11 +288,14 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         info_dict = {}
 
         # 如果任何一个小弟撞墙了，或者老大到终点了，这局就结束
-        any_follower_crashed = any(in_danger_zone[1:])
+        any_follower_crashed = any(in_crash_zone[1:])
+        # print("any_follower_crashed:", any_follower_crashed)
         episode_done = leader_done or any_follower_crashed
+        # episode_done = leader_done
 
-        for i, agent_id in enumerate(self._agent_ids):
+        for i, agent_id in enumerate(self._agent_ids): #agenr_ids指的就是跟随者的ID列表
             obs_dict[agent_id] = self._get_single_follower_obs(i)
+            # print(f"obs_dict[{agent_id}]:", obs_dict[agent_id])
             # 所有人吃大锅饭：拿到完全一样的团队总分！
             reward_dict[agent_id] = team_reward 
             terminated_dict[agent_id] = episode_done
@@ -252,7 +313,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         return obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict
 
     def _get_single_follower_obs(self, follower_idx):
-        my_pos = self.follower_pos[follower_idx]
+        my_pos = self.follower_pos[follower_idx] # 当前这个小弟的绝对坐标
         
         # 1. 算雷达 (保持不变)
         lidar_data = self._simulate_radar(my_pos)
@@ -265,11 +326,24 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         lidar_obs[2] = features.left_clearance  
         lidar_obs[3] = features.right_clearance 
         lidar_obs[4] = features.obstacle_density  
-        lidar_obs[4:12] = np.array(features.sector_min_dists, dtype=np.float32)
+        lidar_obs[5:13] = np.array(features.sector_min_dists, dtype=np.float32)
         lidar_obs[13:21] = np.array(features.sector_avg_dists, dtype=np.float32)
 
-        # 2. 算老大的相对位置
-        leader_rel = self.leader_pos - my_pos
+        lidar_obs = np.round(lidar_obs, 1)
+
+        # print("lidar_obs:", lidar_obs)
+
+        # 坐标转换函数：将全局向量转为老大的局部坐标系
+        cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
+        def global_to_local(vec):
+            return np.array([
+                vec[0] * cos_y + vec[1] * sin_y,
+                -vec[0] * sin_y + vec[1] * cos_y
+            ], dtype=np.float32)
+
+        # 2. 算老大的相对位置 (转为局部)
+        leader_rel_global = self.leader_pos - my_pos # 全局坐标差
+        leader_rel = global_to_local(leader_rel_global) # 转为老大局部坐标系下的相对位置
         
         # ==========================================
         # ✅ 3. 核心升级：KNN + 感知半径 过滤兄弟
@@ -278,20 +352,23 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         entities = []
         
         # 1. 考察老大 (Global ID: 0)
-        dist_to_leader = np.linalg.norm(self.leader_pos - my_pos)
+        dist_to_leader = np.linalg.norm(leader_rel_global)
         if dist_to_leader <= self.sensing_radius:
-            entities.append({'dist': dist_to_leader, 'rel_pos': self.leader_pos - my_pos, 'global_id': 0})
+            entities.append({'dist': dist_to_leader, 'rel_pos': leader_rel, 'global_id': 0})
             
         # 2. 考察其他兄弟 (Global ID: j + 1)
         for j in range(self.num_followers):
             if j != follower_idx:
-                rel = self.follower_pos[j] - my_pos
-                dist = np.linalg.norm(rel)
+                rel_global = self.follower_pos[j] - my_pos
+                dist = np.linalg.norm(rel_global)
                 if dist <= self.sensing_radius:
-                    entities.append({'dist': dist, 'rel_pos': rel, 'global_id': j + 1})
+                    entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global), 'global_id': j + 1})
 
         # 排序并截取最近的 3 个
-        entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates]
+        entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates] # 最近范围内的3个兄弟（可能有老大）
+        # 这里可能会有疑惑，就是如果不够3人，entities最后不满3个，会不会报错，其实不会，因为teammates_obs
+        # 在填充观测数组时，是按照3的实际长度来填的，不够的部分默认就是0了（相当于无效槽位），
+        # 而我们用is_valid来标记有效数据，所以网络学会了如果这个槽位是0，就不理它。
         
         # ✅ 记录翻译密码本：这 3 个槽位分别是谁？
         self.obs_mapping[follower_idx] = [e['global_id'] for e in entities]
@@ -300,6 +377,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         teammates_obs = np.zeros((self.max_visible_teammates * 3), dtype=np.float32)
         for i, e in enumerate(entities):
             idx = i * 3
+            # TODO: 其实这里可以直接改成绝对位置。self.follower_pos。
             teammates_obs[idx] = e['rel_pos'][0]
             teammates_obs[idx+1] = e['rel_pos'][1]
             teammates_obs[idx+2] = 1.0 # 真实存在的标记
@@ -308,17 +386,17 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         return obs
 
     def _simulate_radar(self, origin_pos):
-        num_rays = self.radar_rays
+        num_rays = self.radar_rays # 180
         max_distance = 10.0
-        step_size = self.map_resolution
+        step_size = self.map_resolution # 0.1
         
         lidar_data = formation_core.LidarData(num_rays, max_distance)
-        lidar_data.max_range = max_distance
-        lidar_data.num_beams = num_rays
+        angle_list = []
+        range_list = []
         
         for i in range(num_rays):
             angle = self.leader_yaw + (2 * np.pi * i / num_rays) # 假设雷达朝向跟老大一致
-            lidar_data.angles.append(angle)
+            angle_list.append(angle)
             
             dx = np.cos(angle)
             dy = np.sin(angle)
@@ -328,10 +406,16 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 test_x = origin_pos[0] + r * dx
                 test_y = origin_pos[1] + r * dy
                 if self._is_obstacle(test_x, test_y):
-                    hit_distance = r
+                    hit_distance = round(r, 1)
+                    # print("hit_distance:", hit_distance)
                     break
                     
-            lidar_data.ranges.append(hit_distance)
+            range_list.append(hit_distance)
+
+        lidar_data.angles = angle_list
+        lidar_data.ranges = range_list
+
+        # print("lidar_data.ranges:", lidar_data.ranges)
             
         return lidar_data
 
