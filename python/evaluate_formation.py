@@ -28,14 +28,14 @@ def main():
     # ==========================================
     # 🚨 第一步：填写你最终训练的模型路径！(请替换成你真实的 latest_checkpoint 路径)
     # ==========================================
-    model_path = "/home/lpp/formation_test/data/MADDPG_Formation_a0a92c_2026-03-16_18-56-27/latest_checkpoint"
+    model_path = "/home/nankai/formation_test/data/MADDPG_Formation_560a3e_2026-03-18_17-54-54/latest_checkpoint"
     
     # ==========================================
     # 2. 初始化环境 (开启渲染)
     # ==========================================
     config = {
         "num_robots": 3, 
-        "max_steps": 500, # 可以设长一点，看看能坚持多久
+        "max_steps": 1000, # 可以设长一点，看看能坚持多久
         "render": True,   # ✅ 必须开启渲染！我们要看动画！
         "sensing_radius": 5.0
     }
@@ -80,7 +80,7 @@ def main():
             obs_array = next_obs_array
             
             # ✅ 为了让你肉眼能看清阵型的变化，强制加一点延时，否则画面一闪而过
-            time.sleep(0.05) 
+            time.sleep(0.01) 
             
             if team_done:
                 break

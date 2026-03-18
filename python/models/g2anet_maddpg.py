@@ -18,7 +18,7 @@ class G2ANet_MADDPG_Actor(nn.Module):
         # 1. 特征编码层
         # 自己: 雷达(21) + 老大相对位置(2) = 23维
         self.self_encoder = nn.Sequential(
-            nn.Linear(23, self.rnn_hidden_dim),
+            nn.Linear(25, self.rnn_hidden_dim),
             nn.ReLU()
         )
         # 队友: 相对位置(dx, dy) + is_valid标志位 = 3维
@@ -51,8 +51,11 @@ class G2ANet_MADDPG_Actor(nn.Module):
         batch_size = obs.shape[0]
 
         # 拆解观测值
-        self_features = obs[:, :23] 
-        teammates_obs = obs[:, 23:].view(batch_size, self.max_visible_teammates, 3)
+        self_features_raw = obs[:, :23]
+        teammate_end = 23 + self.max_visible_teammates * 3
+        teammates_obs = obs[:, 23:teammate_end].view(batch_size, self.max_visible_teammates, 3)
+        role_code = obs[:, teammate_end:teammate_end + 2]
+        self_features = torch.cat([self_features_raw, role_code], dim=-1)
         valid_mask = teammates_obs[:, :, 2] 
 
         # 编码

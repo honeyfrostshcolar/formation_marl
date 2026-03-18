@@ -82,10 +82,14 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         else:
             print("❌ 地图文件不存在，生成默认地图")
             grid = np.zeros((200, 200), dtype=bool) 
-            grid[0:5, :] = False; grid[-5:, :] = False
-            grid[:, 0:5] = False; grid[:, -5:] = False
-            grid[100:130, 0:95] = False
-            grid[100:140, 120:200] = False
+            grid[0:5, :] = True; grid[-5:, :] = True
+            grid[:, 0:5] = True; grid[:, -5:] = True
+            grid[30:50, 0:120] = True
+            grid[75:100, 50:200] = True
+            grid[130:140, 0:120] = True
+      
+            grid[165:175, 100:200] = True
+
             grid[160:170, 90:110] = False
             return grid
 
@@ -107,10 +111,17 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             np.random.seed(seed)
             
         while True:
-            start_idx = self._get_random_free_point_with_clearance(2.5)
-            # world_start = self._grid_to_world(*start_idx)
-            # print("World start:", world_start)
-            goal_idx = self._get_random_free_point()
+            # start_idx = self._get_random_free_point_with_clearance(2.5)
+            # # world_start = self._grid_to_world(*start_idx)
+            # # print("World start:", world_start)
+            # goal_idx = self._get_random_free_point()
+            
+            start_pos = [-7.5,-8]
+            goal_pos = [-7.5, 0.0]
+            start_idx = self._world_to_grid(*start_pos)
+            goal_idx = self._world_to_grid(*goal_pos)
+
+
             path_indices = self._plan_path(start_idx, goal_idx)
             if len(path_indices) > 10: 
                 break
@@ -291,6 +302,8 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         any_follower_crashed = any(in_crash_zone[1:])
         # print("any_follower_crashed:", any_follower_crashed)
         episode_done = leader_done or any_follower_crashed
+        if leader_done:
+            team_reward += 50.0 # 成功到达终点奖励
         # episode_done = leader_done
 
         for i, agent_id in enumerate(self._agent_ids): #agenr_ids指的就是跟随者的ID列表

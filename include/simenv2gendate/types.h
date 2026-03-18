@@ -45,6 +45,7 @@ struct EnvironmentFeatures {
     double right_clearance;               // 右侧最小距离
     double obstacle_density;              // 障碍物密度
     std::vector<double> sector_min_dists; // 各扇形区域最小距离
+    std::vector<double> sector_min_angle;
     std::vector<double> sector_avg_dists; // 各扇形区域平均距离
     
     // 转换为特征向量

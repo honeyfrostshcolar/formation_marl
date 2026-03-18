@@ -11,6 +11,12 @@ class MADDPGFormationReward:
         self.safety_threshold = safety_threshold # 互碰红线 (米)
         self.target_distance = target_distance   # 目标连线距离 (米)
         self.max_distance = max_distance         # 掉队红线 (米)
+        self.jitter_threshold = 0.20  # 恶意抖动阈值
+
+        self.narrow_width = 3.0    # 小于此宽度，完全变成1字
+        self.wide_width = 6.0      # 大于此宽度，完全变成V字
+        self.lon_tolerance = 0.5   # 纵向(前后)允许的误差死区，给避障留出弹性空间
+        self.danger_geom_scale = 0.1 # 在危险区时，几何奖励的降权系数 (保命优先)
         
         # ✅ 核心价值观权重分配 (全部补齐了！)
         self.w_link = 1.0      # 连线奖励：连了谁，就跟谁保持 target_distance
@@ -32,6 +38,7 @@ class MADDPGFormationReward:
 
         reward_details = {
             'link_score': 0.0,
+            'jitter': 0.0,
             'distance': 0.0,
             'separation': 0.0,
             'direction': 0.0,
@@ -43,17 +50,32 @@ class MADDPGFormationReward:
         # 1. 拓扑连线距离评估 
         # ==========================================
         # 每个小弟只考察自己与领航者，以及与自己最近的一个小弟的距离
+        left_vec = np.array([-forward_vec[1], forward_vec[0]]) #垂直与前进方向
+
         for i in range(num_followers):
             my_pos = follower_positions[i]
-            
-            # A. 方向奖励：鼓励待在老大后方
+
             rel_pos = my_pos - leader_pos
             local_x = np.dot(rel_pos, forward_vec)
 
-            direction_penalty = max(local_x, 0.0)   # 只罚跑前面
+            direction_penalty = max(local_x, 0.0)
             team_reward -= self.w_direction * direction_penalty
+            reward_details['direction'] -= self.w_direction * direction_penalty
 
-            reward_details['direction'] -= (self.w_direction * direction_penalty)
+            prev_rel = prev_follower_positions[i] - leader_pos
+            curr_rel = follower_positions[i] - leader_pos
+
+            delta_rel = curr_rel - prev_rel
+            lon_move = abs(np.dot(delta_rel, forward_vec)) #纵向位移
+            lat_move = abs(np.dot(delta_rel, left_vec)) #横向位移
+
+            lon_excess = max(0.0, lon_move - 0.08)
+            lat_excess = max(0.0, lat_move - 0.03)
+
+            jitter_penalty = 0.3 * lon_excess + 1.0 * lat_excess
+
+            team_reward -= self.w_jitter * jitter_penalty
+            reward_details['jitter'] -= self.w_jitter * jitter_penalty
 
             # global_i = i + 1  # 因为 leader_pos 在索引 0，所以小弟的全局索引是 i+1
             # targets_with_weights = dynamic_connections.get(global_i, []) # 格式类似： {1: [(2, 0.6), (3, 0.3), (4, 0.1)]}
@@ -108,53 +130,64 @@ class MADDPGFormationReward:
                 reward_details['danger'] -= self.w_danger
 
         # ==========================================
-        # 4. 几何队形奖励 (虚拟结构法 / 槽位对齐)
+        # ✅ 修改 2：第4部分 彻底升级为【软切换 + 纵向容忍】架构
         # ==========================================
         geometry_score = 0.0
-        
-        # 定义 V 字形的展开角度，例如 45度 (pi/4) 或是 30度 (pi/6)
         v_angle = np.pi / 4 
         
+        # 计算软切换系数 alpha (0 代表纯1字，1 代表纯V字)
+        # narrow_width = 3.0   wide_width = 5.0
+        # print(f"corridor_width: {corridor_width}")
+        alpha = np.clip(
+            (corridor_width - self.narrow_width) / (self.wide_width - self.narrow_width), 
+            0.0, 1.0
+        )
+
+        line_spacing = 0.9
+        
         for i, pos in enumerate(follower_positions):
-            global_i = i + 1 # 小弟的真实编号：1, 2, 3, 4...
+            global_i = i + 1 
             
-            # 将当前小弟的全局坐标转为相对于老大的局部坐标
+            # 转局部坐标
             rel_pos = pos - leader_pos
             local_x = np.dot(rel_pos, forward_vec)
-            local_y = np.dot(rel_pos, np.array([-forward_vec[1], forward_vec[0]]))
+            local_y = np.dot(rel_pos, left_vec)
             
-            target_local_x = 0.0
-            target_local_y = 0.0
+            # --- 计算目标1：一字长蛇阵 ---
+            line_x = - global_i * line_spacing
+            line_y = 0.0
             
-            # 模式1：狭窄道 -> 一字长蛇阵 (1-shape)
-            if corridor_width < 3.0: 
-                # 都在 Y=0 的中心线上，X 轴向后排开
-                target_local_x = - global_i * self.target_distance
-                target_local_y = 0.0
-                
-            # 模式2：开阔地 -> 大雁 V 字形 (V-shape)
-            elif corridor_width > 4.5: 
-                # 规律：奇数号在左边 (1, 3, 5...)，偶数号在右边 (2, 4, 6...)
-                # 行数计算：1,2号在第1排；3,4号在第2排
-                row = (global_i + 1) // 2 
-                
-                # 方向：左侧 Y 为正，右侧 Y 为负
-                side_multiplier = 1.0 if global_i % 2 != 0 else -1.0 
-                
-                # 利用三角函数算出目标槽位的精确坐标
-                target_local_x = - row * self.target_distance * np.cos(v_angle)
-                target_local_y = side_multiplier * row * self.target_distance * np.sin(v_angle)
-            
-            else:
-                # 介于 3.0 和 4.5 之间的过渡区，可以暂时不给强硬的几何惩罚，让其自然过渡
-                # 或者你也可以在这里写一个线性插值，让 V 字形慢慢向 1 字形收缩
-                continue 
+            # --- 计算目标2：V字阵 ---
+            row = (global_i + 1) // 2 
+            side_multiplier = 1.0 if global_i % 2 != 0 else -1.0 
+            v_x = - row * self.target_distance * np.cos(v_angle)
+            v_y = side_multiplier * row * self.target_distance * np.sin(v_angle)
 
-            # 计算当前真实位置与“理想虚拟槽位”的欧氏距离偏差
-            slot_error = np.sqrt((local_x - target_local_x)**2 + (local_y - target_local_y)**2)
+            # --- 软插值：融合两者的目标槽位 ---
+            target_local_x = (1.0 - alpha) * line_x + alpha * v_x
+            target_local_y = (1.0 - alpha) * line_y + alpha * v_y
+
+            # --- 误差计算（横向与纵向解耦）---
+            delta_x = abs(local_x - target_local_x)
+            delta_y = abs(local_y - target_local_y)
+
+            # 纵向给予一定容忍度（允许小车前后减速避障，只要不超标就不算偏离）
+            lon_error = max(0.0, delta_x - self.lon_tolerance) # lon_tolerance = 0.5
+            lat_error = delta_y # 横向零容忍，防撞墙
+
+            # 合成有效误差
+            effective_error = np.sqrt(lon_error**2 + lat_error**2)
             
-            # 偏差越大，扣分越狠 (乘以一个权重，比如 2.0)
-            geometry_score += np.exp(-slot_error) 
+            # --- 危险区降权判定 ---
+            is_scared = in_danger_zone[global_i]
+            # 如果处于危险区，编队分数大幅缩水，逼迫网络专注规避 danger 惩罚
+            if is_scared and alpha > 0.5:
+                geometry_scale = self.danger_geom_scale
+            else:
+                geometry_scale = 1.0
+
+            # 最终几何得分
+            geometry_score += np.exp(-effective_error) * geometry_scale
 
         team_reward += self.w_geometry * geometry_score
         reward_details['geometry'] += (self.w_geometry * geometry_score)
@@ -165,10 +198,10 @@ class MADDPGFormationReward:
         any_crash = any(in_crash_zone)
         if any_crash:
             # 不要用 -200，用 -20 足够让它明白这是致命错误，同时不炸毁梯度
-            team_reward -= 5.0 
-            reward_details['danger'] -= 5.0
+            team_reward -= 100.0 
+            reward_details['danger'] -= 100.0
         else:
-            team_reward += 0.2 # 存活奖励
+            team_reward += 2 # 存活奖励
         
         # print(f"Reward Details: {reward_details}")
 

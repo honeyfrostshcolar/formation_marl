@@ -49,13 +49,13 @@ def main():
     # ==========================================
     # 1. 训练参数与工程目录设置
     # ==========================================
-    train_iterations = 1000
-    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
+    train_iterations = 5000
+    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
     # resume_checkpoint = None  
-    resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_a0a92c_2026-03-16_18-56-27/latest_checkpoint" 
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_2132a9_2026-03-17_21-33-40/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -75,7 +75,7 @@ def main():
     # ==========================================
     config = {
         "num_robots": 3, 
-        "max_steps": 200, 
+        "max_steps": 2000, 
         "render": False,  # ⚠️ 训练时必须关闭渲染以保证速度！
         "sensing_radius": 5.0
     }

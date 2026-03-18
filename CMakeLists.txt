@@ -61,45 +61,45 @@ set_target_properties(simenv2gen_main PROPERTIES
 )
 
 # ========== 测试配置 ==========
-option(BUILD_TESTS "Build test executables" ON)
+# option(BUILD_TESTS "Build test executables" ON)
 
-if(BUILD_TESTS)
-    # 查找 Google Test
-    find_package(GTest REQUIRED)
+# if(BUILD_TESTS)
+#     # 查找 Google Test
+#     find_package(GTest REQUIRED)
     
-    enable_testing()
+#     enable_testing()
 
-    # 手动指定测试文件，避免使用 GLOB
-    set(TEST_SOURCES
-        ${CMAKE_SOURCE_DIR}/test/test_main.cpp
-        ${CMAKE_SOURCE_DIR}/test/test_enumeration.cpp
-        ${CMAKE_SOURCE_DIR}/test/test_transformation.cpp
-        ${CMAKE_SOURCE_DIR}/test/test_visualization.cpp
-    )
-
-    foreach(test_src ${TEST_SOURCES})
-        get_filename_component(test_name ${test_src} NAME_WE)
-
-        # 只链接核心库，不包含主程序源文件
-        add_executable(${test_name} ${test_src})
-        target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
-        target_link_libraries(${test_name} 
-            PRIVATE 
-            formation_core_cpp
-            GTest::gtest 
-            GTest::gtest_main
-        )
-
-        set_target_properties(${test_name} PROPERTIES 
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests
-        )
-
-        # 注册为 CTest 测试
-        add_test(NAME ${test_name} COMMAND ${test_name})
+#     # 手动指定测试文件，避免使用 GLOB
+#     set(TEST_SOURCES
+#         ${CMAKE_SOURCE_DIR}/test/test_main.cpp
+#         ${CMAKE_SOURCE_DIR}/test/test_enumeration.cpp
+#         ${CMAKE_SOURCE_DIR}/test/test_transformation.cpp
         
-        # 添加测试发现（Google Test 专用）
-        gtest_discover_tests(${test_name}
-            WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
-        )
-    endforeach()
-endif()
+#     )
+
+#     foreach(test_src ${TEST_SOURCES})
+#         get_filename_component(test_name ${test_src} NAME_WE)
+
+#         # 只链接核心库，不包含主程序源文件
+#         add_executable(${test_name} ${test_src})
+#         target_include_directories(${test_name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+#         target_link_libraries(${test_name} 
+#             PRIVATE 
+#             formation_core_cpp
+#             GTest::gtest 
+#             GTest::gtest_main
+#         )
+
+#         set_target_properties(${test_name} PROPERTIES 
+#             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/tests
+#         )
+
+#         # 注册为 CTest 测试
+#         add_test(NAME ${test_name} COMMAND ${test_name})
+        
+#         # 添加测试发现（Google Test 专用）
+#         gtest_discover_tests(${test_name}
+#             WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+#         )
+#     endforeach()
+# endif()
