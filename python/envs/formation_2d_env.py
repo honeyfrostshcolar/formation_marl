@@ -40,8 +40,6 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.max_visible_teammates = 3  # 网络最多只管最近的 3 个兄弟
         
         self.reward_fn = MADDPGFormationReward()
-        # 密码本，用于记录网络视野槽位对应的真实全局ID
-        self.obs_mapping = {i: [] for i in range(self.num_followers)}
         
         self.leader_velocity = [0.0, 0.1]  
         self.leader_pos = np.array([0.0, 0.0], dtype=np.float32)
@@ -84,11 +82,11 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             grid = np.zeros((200, 200), dtype=bool) 
             grid[0:5, :] = True; grid[-5:, :] = True
             grid[:, 0:5] = True; grid[:, -5:] = True
-            grid[30:50, 0:120] = True
-            grid[75:100, 50:200] = True
-            grid[130:140, 0:120] = True
+            grid[30:50, 0:120] = False
+            grid[75:100, 50:200] = False
+            grid[130:140, 0:120] = False
       
-            grid[165:175, 100:200] = True
+            grid[165:175, 100:200] = False
 
             grid[160:170, 90:110] = False
             return grid
@@ -203,7 +201,10 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 self.path.pop(0)
             else:
                 self.leader_pos += (direction / distance_to_target) * move_step
-                self.leader_yaw = np.arctan2(direction[1], direction[0])
+                target_dir = target_pos - self.leader_pos
+                target_yaw = np.arctan2(target_dir[1], target_dir[0])
+                yaw_diff = (target_yaw - self.leader_yaw + np.pi) % (2 * np.pi) - np.pi
+                self.leader_yaw += np.clip(yaw_diff, -0.15, 0.15)
         else:
             leader_done = True
 
@@ -218,7 +219,13 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             if agent_id not in action_dict:
                 continue
                 
-            local_action = np.array(action_dict[agent_id]) * 1.0 # 还原范围
+            x_back = self.num_followers * 0.9 + 0.5
+            y_span = 2.0
+            ax, ay = action_dict[agent_id] 
+
+            local_x = -(ax + 1.0) / 2.0 * x_back
+            local_y = ay * y_span
+            local_action = np.array([local_x, local_y], dtype=np.float32) # 还原范围
             
             # 从局部坐标（相对于老大的车头）转为全局相对坐标
             global_dx = local_action[0] * cos_yaw - local_action[1] * sin_yaw
@@ -230,28 +237,21 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.step_count += 1
         is_timeout = self.step_count >= self.max_steps # 超时结束
 
-        # ✅ 3. 新增翻译官逻辑：根据 graph_dict 和密码本，生成全局连线列表
-        # TODO：这里有很大问题，如果is_valid是0，说明这个槽位没有兄弟了，
-        # 那么我们就不应该让网络学会把这个槽位当成坐标原点的兄弟，所以在计算奖励时，如果is_valid是0，
-        # 就直接跳过这个槽位，不管它的坐标是什么值（包括0）。同样的，如果is_valid是1，我们才让网络学会把这个坐标当成一个真实兄弟的位置来计算奖励。
+        # 直接根据 N x N 的图矩阵翻译连线
         dynamic_connections = {}
         for i, agent_id in enumerate(self._agent_ids):
             global_follower_id = i + 1
             dynamic_connections[global_follower_id] = []
             
             if agent_id in graph_dict:
-                hard_weights = graph_dict[agent_id] # 网络吐出的比如 [1, 0, 0]
-                soft_weights = np.array(graphs_soft_dict[agent_id]).flatten() # 软权重，比如 [0.7, 0.2, 0.1]
-                # print(f"Agent {agent_id} hard_weights: {hard_weights}, soft_weights: {soft_weights}")
-                mapping = self.obs_mapping[i]       # 密码本记录的比如 [0, 3, 4]
+                hard_weights = graph_dict[agent_id] # 这是长度为 N 的数组
+                soft_weights = np.array(graphs_soft_dict[agent_id]).flatten()
                 
-                for k in range(len(mapping)):
-                    # 只有当硬权重为 1（真正建立了连接）时，我们才计算它的弹性惩罚
-                    if hard_weights[k] > 0:
-                        target_global_id = mapping[k]
-                        current_soft_weight = soft_weights[k]
-                        
-                        # 打包成元组 (target_global_id, current_soft_weight) 追加进去
+                # 遍历图输出的 N 个目标槽位，直接对应所有的 follower
+                for j in range(self.num_followers):
+                    if hard_weights[j] > 0 and j != i: # 如果建立了硬连接，且不是自己连自己
+                        target_global_id = j + 1 # leader 是 0，follower 从 1 开始
+                        current_soft_weight = soft_weights[j]
                         dynamic_connections[global_follower_id].append((target_global_id, current_soft_weight))
 
         positions_3d = np.zeros((self.num_robots, 3), dtype=np.float32)
@@ -326,9 +326,9 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         return obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict
 
     def _get_single_follower_obs(self, follower_idx):
-        my_pos = self.follower_pos[follower_idx] # 当前这个小弟的绝对坐标
+        my_pos = self.follower_pos[follower_idx] 
         
-        # 1. 算雷达 (保持不变)
+        # 1. 算雷达 (防撞底线，雷达会扫到墙壁，也会扫到靠得太近的队友)
         lidar_data = self._simulate_radar(my_pos)
         feature_extractor = formation_core.FeatureExtractor(8)
         features = feature_extractor.extract_features(lidar_data)
@@ -341,12 +341,9 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         lidar_obs[4] = features.obstacle_density  
         lidar_obs[5:13] = np.array(features.sector_min_dists, dtype=np.float32)
         lidar_obs[13:21] = np.array(features.sector_avg_dists, dtype=np.float32)
-
         lidar_obs = np.round(lidar_obs, 1)
 
-        # print("lidar_obs:", lidar_obs)
-
-        # 坐标转换函数：将全局向量转为老大的局部坐标系
+        # 2. 算老大的相对位置 (队形的绝对锚点)
         cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
         def global_to_local(vec):
             return np.array([
@@ -354,55 +351,18 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 -vec[0] * sin_y + vec[1] * cos_y
             ], dtype=np.float32)
 
-        # 2. 算老大的相对位置 (转为局部)
-        leader_rel_global = self.leader_pos - my_pos # 全局坐标差
-        leader_rel = global_to_local(leader_rel_global) # 转为老大局部坐标系下的相对位置
+        leader_rel_global = self.leader_pos - my_pos 
+        leader_rel = global_to_local(leader_rel_global)
         
-        # ==========================================
-        # ✅ 3. 核心升级：KNN + 感知半径 过滤兄弟
-        # ==========================================
-        # ✅ 核心升级：把老大和其他小弟，统一放进“感知候选池”里
-        entities = []
-        
-        # 1. 考察老大 (Global ID: 0)
-        dist_to_leader = np.linalg.norm(leader_rel_global)
-        if dist_to_leader <= self.sensing_radius:
-            entities.append({'dist': dist_to_leader, 'rel_pos': leader_rel, 'global_id': 0})
-            
-        # 2. 考察其他兄弟 (Global ID: j + 1)
-        for j in range(self.num_followers):
-            if j != follower_idx:
-                rel_global = self.follower_pos[j] - my_pos
-                dist = np.linalg.norm(rel_global)
-                if dist <= self.sensing_radius:
-                    entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global), 'global_id': j + 1})
-
-        # 排序并截取最近的 3 个
-        entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates] # 最近范围内的3个兄弟（可能有老大）
-        # 这里可能会有疑惑，就是如果不够3人，entities最后不满3个，会不会报错，其实不会，因为teammates_obs
-        # 在填充观测数组时，是按照3的实际长度来填的，不够的部分默认就是0了（相当于无效槽位），
-        # 而我们用is_valid来标记有效数据，所以网络学会了如果这个槽位是0，就不理它。
-        
-        # ✅ 记录翻译密码本：这 3 个槽位分别是谁？
-        self.obs_mapping[follower_idx] = [e['global_id'] for e in entities]
-
-        # 填充到观测数组里喂给网络
-        teammates_obs = np.zeros((self.max_visible_teammates * 3), dtype=np.float32)
-        for i, e in enumerate(entities):
-            idx = i * 3
-            # TODO: 其实这里可以直接改成绝对位置。self.follower_pos。
-            teammates_obs[idx] = e['rel_pos'][0]
-            teammates_obs[idx+1] = e['rel_pos'][1]
-            teammates_obs[idx+2] = 1.0 # 真实存在的标记
-            
+        # 3. 自身身份编码 (让网络知道自己是谁)
         side = 1.0 if follower_idx % 2 == 0 else -1.0
         rank = (follower_idx + 2) // 2
         max_rank = max(1, (self.num_followers + 1) // 2)
         rank_norm = rank / max_rank
-
         role_code = np.array([side, rank_norm], dtype=np.float32)
 
-        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code])
+        # 🚀 观测拼接：干掉 teammates_obs！只有自己、雷达和老大！
+        obs = np.concatenate([lidar_obs, leader_rel, role_code])
         return obs
 
     def _simulate_radar(self, origin_pos):

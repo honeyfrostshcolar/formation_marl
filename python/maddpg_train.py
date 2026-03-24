@@ -4,6 +4,7 @@ import uuid
 import shutil
 import numpy as np
 import torch
+import argparse
 from torch.utils.tensorboard import SummaryWriter # 原生 TensorBoard
 
 from envs.formation_2d_env import Formation2DMultiAgentEnv 
@@ -42,20 +43,85 @@ def load_checkpoint(agent, path):
         return checkpoint['episode']
     return 0
 
+def parse_args():
+    parser = argparse.ArgumentParser("MADDPG + MAGIC (LSTM) for Formation Control")
+    
+    # ==========================================
+    # 一、 环境与训练总体参数
+    # ==========================================
+    parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量 (包含1个领航者和N个跟随者)")
+    parser.add_argument("--max_steps", type=int, default=1000, help="每回合(Episode)环境交互的最大步数限制")
+    parser.add_argument("--train_iterations", type=int, default=5000, help="总训练回合数 (Episodes)")
+    parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的批量大小")
+    parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池(Replay Buffer)的最大容量")
+    parser.add_argument("--sensing_radius", type=float, default=5.0, help="机器人的局部最大感知半径 (米)")
+    parser.add_argument("--render", action="store_true", default=True, help="加上这个参数就开启画面渲染 (⚠️训练时建议设为False以提升速度)")
+    
+    # ==========================================
+    # 二、 MADDPG 强化学习算法基础参数
+    # ==========================================
+    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor 策略网络的学习率")
+    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic 价值网络的学习率")
+    parser.add_argument("--gamma", type=float, default=0.99, help="强化学习奖励折扣因子 (Gamma，越接近1越看重长期收益)")
+    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数 (Tau，控制新老权重融合比例)")
+    
+    # ==========================================
+    # 三、 MAGIC (多智能体图注意力通信) 核心架构参数
+    # ==========================================
+    # 3.1 基础维度设置
+    parser.add_argument("--hid_size", type=int, default=64, help="所有 MLP 隐藏层及 LSTM 记忆单元的特征维度")
+    parser.add_argument("--gat_hid_size", type=int, default=64, help="子处理器(GAT)内部进行图通信聚合时的特征维度")
+    
+    # 3.2 图注意力层(GAT)配置
+    parser.add_argument("--gat_num_heads", type=int, default=4, help="第一轮通信 GAT 层使用的多头注意力(Multi-head)数量")
+    parser.add_argument("--gat_num_heads_out", type=int, default=1, help="第二轮通信 GAT 层使用的多头注意力数量")
+    parser.add_argument("--self_loop_type1", type=int, default=2, help="第一层GAT自环类型 (0:强行无自环, 1:强行加自环, 2:完全由调度器学习决定)")
+    parser.add_argument("--self_loop_type2", type=int, default=2, help="第二层GAT自环类型 (0:强行无自环, 1:强行加自环, 2:完全由调度器学习决定)")
+    parser.add_argument("--first_gat_normalize", action="store_true", default=False, help="是否对第一层 GAT 计算出的注意力权重进行归一化")
+    parser.add_argument("--second_gat_normalize", action="store_true", default=False, help="是否对第二层 GAT 计算出的注意力权重进行归一化")
+    
+    # 3.3 子调度器(Sub-scheduler)图生成控制
+    parser.add_argument("--use_gat_encoder", action="store_true", default=False, help="调度器在决定谁跟谁通信前，是否先用额外的 GAT 编码器提取特征 (否则用普通MLP)")
+    parser.add_argument("--first_graph_complete", action="store_true", default=False, help="第一轮通信是否跳过调度网络，强行让所有人建立全连接图通信")
+    parser.add_argument("--learn_second_graph", action="store_true", default=True, help="是否激活第二个调度网络来动态学习第二轮的通信拓扑图")
+    parser.add_argument("--second_graph_complete", action="store_true", default=False, help="第二轮通信是否跳过调度网络，强行让所有人建立全连接图通信")
+    parser.add_argument("--directed", action="store_true", default=True, help="学习出的通信图是否有向 (True=有向图，即A理B但不代表B理A; False=无向图)")
+    parser.add_argument("--comm_mask_zero", action="store_true", default=False, help="是否强行切断所有人的通信 (仅用于做消融实验，证明通信的必要性)")
+    
+    # 3.4 调度器 GAT 编码器专属参数 (仅在 use_gat_encoder=True 时生效)
+    parser.add_argument("--gat_encoder_out_size", type=int, default=64, help="调度器专属 GAT 编码器输出的隐藏层维度")
+    parser.add_argument("--ge_num_heads", type=int, default=4, help="调度器专属 GAT 编码器的多头注意力数量")
+    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False, help="调度器专属 GAT 编码器是否进行注意力权重归一化")
+    
+    # 3.5 消息的额外加工层
+    parser.add_argument("--message_encoder", action="store_true", default=False, help="在把隐藏状态当作消息发出去之前，是否先通过一个全连接层进行预处理")
+    parser.add_argument("--message_decoder", action="store_true", default=False, help="在收到全局消息后，是否先通过一个全连接层进行解码再输入动作网络")
+    parser.add_argument("--comm_init", type=str, default="zeros", help="通信相关网络全连接层权重的初始赋零方式 (如 'zeros' 防止初始通信引发混乱)")
+
+    args = parser.parse_args()
+    
+    args.num_followers = args.num_robots - 1
+    args.nagents = args.num_followers # 对齐原版变量名
+    args.action_dim = 2 
+    args.obs_size = 25 
+    
+    return args
+
 def main():
+    args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 Training starting on device: {device}")
 
     # ==========================================
     # 1. 训练参数与工程目录设置
     # ==========================================
-    train_iterations = 5000
-    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
+    train_iterations = args.train_iterations
+    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    # resume_checkpoint = None  
-    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_2132a9_2026-03-17_21-33-40/latest_checkpoint" 
+    resume_checkpoint = None  
+    # resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_2132a9_2026-03-17_21-33-40/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -70,32 +136,21 @@ def main():
     # 初始化原生 TensorBoard 记录器
     writer = SummaryWriter(log_dir=save_root_dir)
 
+    config = {
+        "num_robots": args.num_robots, 
+        "max_steps": args.max_steps, 
+        "render": args.render,  # <--- 动态读取命令行参数
+        "sensing_radius": args.sensing_radius
+    }
+
     # ==========================================
     # 2. 初始化环境、智能体和经验池
     # ==========================================
-    config = {
-        "num_robots": 3, 
-        "max_steps": 2000, 
-        "render": False,  # ⚠️ 训练时必须关闭渲染以保证速度！
-        "sensing_radius": 5.0
-    }
     env = Formation2DMultiAgentEnv(config)
-    num_followers = env.num_followers
-    agent_ids = env._agent_ids
+    agent = MADDPG_Agent(args)
+    buffer = ReplayBuffer(args.buffer_capacity, args.num_followers, args.obs_size, args.action_dim, args.hid_size, device)
     
-    obs_dim = env.observation_space.shape[0] 
-    action_dim = env.action_space.shape[0]   
-
-    agent = MADDPG_Agent(num_followers=num_followers, obs_dim=obs_dim, action_dim=action_dim)
-    
-    buffer = ReplayBuffer(
-        capacity=10000, 
-        num_followers=num_followers, 
-        obs_dim=obs_dim, 
-        action_dim=action_dim, 
-        device=device
-    )
-    batch_size = 256 # 每次更新的批量大小
+    batch_size = args.batch_size # 每次更新的批量大小
 
     # ==========================================
     # 3. 执行断点续训加载逻辑
@@ -126,32 +181,44 @@ def main():
         
 
         obs_dict, _ = env.reset()
-        obs_array = np.array([obs_dict[agent_id] for agent_id in agent_ids])
+        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids])
+
+        h_in, c_in = agent.init_hidden()
         
         episode_reward = 0.0
         episode_actor_loss = []
         episode_critic_loss = []
         
-        for step in range(config["max_steps"]):
+        for step in range(args.max_steps):
             # 前向决策
-            actions_array, graphs_array, graphs_soft_array = agent.select_action(obs_array, add_noise=True, noise_scale=current_noise)
-            action_dict = {agent_ids[i]: actions_array[i] for i in range(num_followers)}
-            graph_dict = {agent_ids[i]: graphs_array[i] for i in range(num_followers)}
-            graphs_soft_dict = {agent_ids[i]: graphs_soft_array[i] for i in range(num_followers)}
+            actions_array, graphs_array, graphs_soft_array, h_out, c_out = agent.select_action(
+                obs_array, h_in, c_in, add_noise=True, noise_scale=current_noise
+            )
+            action_dict = {env._agent_ids[i]: actions_array[i] for i in range(args.num_followers)}
+            graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
+            graphs_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
 
             # 环境步进
             next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict, graphs_soft_dict)
-            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in agent_ids])
+            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids])
             
-            team_reward = reward_dict[agent_ids[0]]
+            team_reward = reward_dict[env._agent_ids[0]]
             # print("terminated_dict:", terminated_dict, "truncated_dict:", truncated_dict)
             team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
             # print( "team_done:", team_done)
             
             # 存入经验池
-            buffer.store(obs_array, actions_array, float(team_reward), next_obs_array, float(team_done))
+            # 存入 Buffer 时，把旧记忆(in)和新记忆(out)一起转成 numpy 存进去
+            buffer.store(
+                obs_array, actions_array, float(team_reward), next_obs_array, float(team_done),
+                h_in.squeeze(0).cpu().numpy(), c_in.squeeze(0).cpu().numpy(),
+                h_out.squeeze(0).cpu().numpy(), c_out.squeeze(0).cpu().numpy()
+            )
             episode_reward += team_reward
-            
+            obs_array = next_obs_array
+            h_in = h_out
+            c_in = c_out
+
             # 核心：更新网络
             learning_starts = 5000  # 先积累一些经验再开始学习
             if buffer.size() >= learning_starts:

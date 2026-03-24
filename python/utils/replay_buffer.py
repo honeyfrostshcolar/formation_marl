@@ -9,7 +9,7 @@ class ReplayBuffer:
     专为多智能体连续控制 (MADDPG) 定制的经验回放池
     极致精简版，去除了所有离散动作和RNN序列的冗余操作
     """
-    def __init__(self, capacity, num_followers, obs_dim, action_dim, device):
+    def __init__(self, capacity, num_followers, obs_dim, action_dim, hid_size, device):
         self.capacity = int(capacity)
         self.num_followers = num_followers
         self.device = device
@@ -26,11 +26,16 @@ class ReplayBuffer:
         self.reward_buffer = np.zeros((self.capacity, 1), dtype=np.float32)
         self.done_buffer = np.zeros((self.capacity, 1), dtype=np.float32)
         
+        self.h_in_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
+        self.c_in_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
+        self.h_out_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
+        self.c_out_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
+
         # 内存指针和当前大小记录
         self.ptr = 0
         self.size_tracker = 0
 
-    def store(self, obs, action, reward, next_obs, done):
+    def store(self, obs, action, reward, next_obs, done, h_in, c_in, h_out, c_out):
         """
         存入一步经验 (transition)
         obs, action, next_obs 是 numpy 数组，形状应为 (num_followers, dim)
@@ -42,6 +47,11 @@ class ReplayBuffer:
         self.next_obs_buffer[self.ptr] = next_obs
         self.done_buffer[self.ptr] = done
         
+        self.h_in_buffer[self.ptr] = h_in
+        self.c_in_buffer[self.ptr] = c_in
+        self.h_out_buffer[self.ptr] = h_out
+        self.c_out_buffer[self.ptr] = c_out
+
         # 环形缓冲区逻辑：满了就从头开始覆盖最老的数据
         self.ptr = (self.ptr + 1) % self.capacity
         self.size_tracker = min(self.size_tracker + 1, self.capacity)
@@ -61,7 +71,12 @@ class ReplayBuffer:
         next_obs_batch = torch.FloatTensor(self.next_obs_buffer[idxs]).to(self.device)
         done_batch = torch.FloatTensor(self.done_buffer[idxs]).to(self.device)
         
-        return obs_batch, action_batch, reward_batch, next_obs_batch, done_batch
+        h_in_batch = torch.FloatTensor(self.h_in_buffer[idxs]).to(self.device)
+        c_in_batch = torch.FloatTensor(self.c_in_buffer[idxs]).to(self.device)
+        h_out_batch = torch.FloatTensor(self.h_out_buffer[idxs]).to(self.device)
+        c_out_batch = torch.FloatTensor(self.c_out_buffer[idxs]).to(self.device)
+        
+        return obs_batch, action_batch, reward_batch, next_obs_batch, done_batch, h_in_batch, c_in_batch, h_out_batch, c_out_batch
     
     # ==========================================
     # ✅ 修复后：把整个脑子（记忆矩阵）打包存到硬盘
@@ -77,7 +92,11 @@ class ReplayBuffer:
             'reward': self.reward_buffer,
             'next_obs': self.next_obs_buffer,
             'done': self.done_buffer,
-            'ptr': self.ptr,   
+            'ptr': self.ptr, 
+            'h_in': self.h_in_buffer,
+            'c_in': self.c_in_buffer,
+            'h_out': self.h_out_buffer,
+            'c_out': self.c_out_buffer,  
             'size_tracker': getattr(self, 'size_tracker', 0) # 确保读取正确的整数变量
         }
         
@@ -99,13 +118,17 @@ class ReplayBuffer:
             self.next_obs_buffer = state['next_obs']
             self.done_buffer = state['done']
             self.ptr = state['ptr']
+            self.h_in_buffer = state['h_in']
+            self.c_in_buffer = state['c_in']
+            self.h_out_buffer = state['h_out']
+            self.c_out_buffer = state['c_out']
             
             # 🚨 救命补丁：如果是读那个带有 Bug 的旧文件，直接手动把 size 设满！
             if 'size_tracker' in state:
                 self.size_tracker = state['size_tracker']
             else:
                 # 兼容旧文件：如果之前错存成了方法，而你跑了 2850 局，池子绝对是满的 (假设容量 10w)
-                self.size_tracker = 100000 # 如果你的 capacity 不是 10w，改成对应的最大容量
+                self.size_tracker = self.capacity # 如果你的 capacity 不是 10w，改成对应的最大容量
                 
             print(f"🧠 [记忆恢复] Replay Buffer 加载成功！当前拥有 {self.size_tracker} 条历史经验。")
         else:
