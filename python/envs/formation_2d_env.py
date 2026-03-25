@@ -82,13 +82,13 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             grid = np.zeros((200, 200), dtype=bool) 
             grid[0:5, :] = True; grid[-5:, :] = True
             grid[:, 0:5] = True; grid[:, -5:] = True
-            grid[30:50, 0:120] = False
-            grid[75:100, 50:200] = False
-            grid[130:140, 0:120] = False
+            grid[30:50, 0:200] = True
+            grid[75:100, 50:200] =  True
+            grid[130:140, 0:120] = True
       
-            grid[165:175, 100:200] = False
+            grid[165:175, 100:200] = True
 
-            grid[160:170, 90:110] = False
+            grid[160:170, 90:110] = True
             return grid
 
     def _world_to_grid(self, x, y):
@@ -114,8 +114,8 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             # # print("World start:", world_start)
             # goal_idx = self._get_random_free_point()
             
-            start_pos = [-7.5,-8]
-            goal_pos = [-7.5, 0.0]
+            start_pos = [-7.5,-8.3]
+            goal_pos = [7.5, -8.3]
             start_idx = self._world_to_grid(*start_pos)
             goal_idx = self._world_to_grid(*goal_pos)
 
@@ -201,8 +201,8 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 self.path.pop(0)
             else:
                 self.leader_pos += (direction / distance_to_target) * move_step
-                target_dir = target_pos - self.leader_pos
-                target_yaw = np.arctan2(target_dir[1], target_dir[0])
+         
+                target_yaw = np.arctan2(direction[1], direction[0])
                 yaw_diff = (target_yaw - self.leader_yaw + np.pi) % (2 * np.pi) - np.pi
                 self.leader_yaw += np.clip(yaw_diff, -0.15, 0.15)
         else:
@@ -326,24 +326,24 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         return obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict
 
     def _get_single_follower_obs(self, follower_idx):
-        my_pos = self.follower_pos[follower_idx] 
-        
-        # 1. 算雷达 (防撞底线，雷达会扫到墙壁，也会扫到靠得太近的队友)
+        my_pos = self.follower_pos[follower_idx]
+
+        # 1. 算雷达 (保持不变)
         lidar_data = self._simulate_radar(my_pos)
         feature_extractor = formation_core.FeatureExtractor(8)
         features = feature_extractor.extract_features(lidar_data)
-        
+
         lidar_obs = np.zeros(21, dtype=np.float32)
-        lidar_obs[0] = features.corridor_width 
+        lidar_obs[0] = features.corridor_width
         lidar_obs[1] = features.front_clearance
-        lidar_obs[2] = features.left_clearance  
-        lidar_obs[3] = features.right_clearance 
-        lidar_obs[4] = features.obstacle_density  
+        lidar_obs[2] = features.left_clearance
+        lidar_obs[3] = features.right_clearance
+        lidar_obs[4] = features.obstacle_density
         lidar_obs[5:13] = np.array(features.sector_min_dists, dtype=np.float32)
         lidar_obs[13:21] = np.array(features.sector_avg_dists, dtype=np.float32)
         lidar_obs = np.round(lidar_obs, 1)
 
-        # 2. 算老大的相对位置 (队形的绝对锚点)
+        # 坐标转换函数：将全局向量转为老大的局部坐标系
         cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
         def global_to_local(vec):
             return np.array([
@@ -351,18 +351,46 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 -vec[0] * sin_y + vec[1] * cos_y
             ], dtype=np.float32)
 
-        leader_rel_global = self.leader_pos - my_pos 
+        # 2. 算老大的相对位置 (转为局部)
+        leader_rel_global = self.leader_pos - my_pos
         leader_rel = global_to_local(leader_rel_global)
-        
-        # 3. 自身身份编码 (让网络知道自己是谁)
+
+        # ==========================================
+        # ✅ 3. 核心升级：KNN + 感知半径 过滤兄弟
+        # ==========================================
+        entities = []
+
+        # 1. 考察老大 (Global ID: 0)
+        dist_to_leader = np.linalg.norm(leader_rel_global)
+        if dist_to_leader <= self.sensing_radius:
+            entities.append({'dist': dist_to_leader, 'rel_pos': leader_rel, 'global_id': 0})
+
+        # 2. 考察其他兄弟 (Global ID: j + 1)
+        for j in range(self.num_followers):
+            if j != follower_idx:
+                rel_global = self.follower_pos[j] - my_pos
+                dist = np.linalg.norm(rel_global)
+                if dist <= self.sensing_radius:
+                    entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global), 'global_id': j + 1})
+
+        # 排序并截取最近的 3 个
+        entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates]
+
+        # 填充到观测数组里喂给网络
+        teammates_obs = np.zeros((self.max_visible_teammates * 3), dtype=np.float32)
+        for i, e in enumerate(entities):
+            idx = i * 3
+            teammates_obs[idx] = e['rel_pos'][0]
+            teammates_obs[idx+1] = e['rel_pos'][1]
+            teammates_obs[idx+2] = 1.0   # 真实存在的标记
+
         side = 1.0 if follower_idx % 2 == 0 else -1.0
         rank = (follower_idx + 2) // 2
         max_rank = max(1, (self.num_followers + 1) // 2)
         rank_norm = rank / max_rank
         role_code = np.array([side, rank_norm], dtype=np.float32)
 
-        # 🚀 观测拼接：干掉 teammates_obs！只有自己、雷达和老大！
-        obs = np.concatenate([lidar_obs, leader_rel, role_code])
+        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code])
         return obs
 
     def _simulate_radar(self, origin_pos):

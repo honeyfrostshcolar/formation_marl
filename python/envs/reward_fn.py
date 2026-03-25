@@ -15,7 +15,7 @@ class MADDPGFormationReward:
 
         self.narrow_width = 3.0    # 小于此宽度，完全变成1字
         self.wide_width = 6.0      # 大于此宽度，完全变成V字
-        self.lon_tolerance = 0.5   # 纵向(前后)允许的误差死区，给避障留出弹性空间
+        self.lon_tolerance = 0.1   # 纵向(前后)允许的误差死区，给避障留出弹性空间
         self.danger_geom_scale = 0.1 # 在危险区时，几何奖励的降权系数 (保命优先)
         
         # ✅ 核心价值观权重分配 (全部补齐了！)
@@ -27,7 +27,7 @@ class MADDPGFormationReward:
         self.w_danger = 2.0      # 危险区：撞墙/进入障碍物膨胀层的重罚权重 (保命)
         self.w_jitter = 1.0      # 平滑度：过度抖动/能量损耗的惩罚权重
         self.w_direction = 8.0   # 方向感：保持在老大后方的得分权重
-        self.w_geometry = 1.0    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
+        self.w_geometry = 2.0    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
 
     
     def compute(self, leader_pos, follower_positions, prev_follower_positions, leader_yaw, in_danger_zone, in_crash_zone, dynamic_connections, corridor_width):
@@ -142,7 +142,7 @@ class MADDPGFormationReward:
             (corridor_width - self.narrow_width) / (self.wide_width - self.narrow_width), 
             0.0, 1.0
         )
-
+        # print("alpha", alpha)
         line_spacing = 0.9
         
         for i, pos in enumerate(follower_positions):
@@ -171,12 +171,14 @@ class MADDPGFormationReward:
             delta_x = abs(local_x - target_local_x)
             delta_y = abs(local_y - target_local_y)
 
-            # 纵向给予一定容忍度（允许小车前后减速避障，只要不超标就不算偏离）
-            lon_error = max(0.0, delta_x - self.lon_tolerance) # lon_tolerance = 0.5
-            lat_error = delta_y # 横向零容忍，防撞墙
+            e = (delta_x) ** 2 + (delta_y) ** 2
 
-            # 合成有效误差
-            effective_error = np.sqrt(lon_error**2 + lat_error**2)
+            # 纵向给予一定容忍度（允许小车前后减速避障，只要不超标就不算偏离）
+            # lon_error = max(0.0, delta_x - self.lon_tolerance) # lon_tolerance = 0.5
+            # lat_error = delta_y # 横向零容忍，防撞墙
+
+            # # 合成有效误差
+            # effective_error = np.sqrt(lon_error**2 + lat_error**2)
             
             # --- 危险区降权判定 ---
             is_scared = in_danger_zone[global_i]
@@ -187,10 +189,10 @@ class MADDPGFormationReward:
                 geometry_scale = 1.0
 
             # 最终几何得分
-            geometry_score += np.exp(-effective_error) * geometry_scale
+            geometry_score += e * geometry_scale
 
-        team_reward += self.w_geometry * geometry_score
-        reward_details['geometry'] += (self.w_geometry * geometry_score)
+        team_reward -= self.w_geometry * geometry_score
+        reward_details['geometry'] -= (self.w_geometry * geometry_score)
 
         # ==========================================
         # 5. 撞墙终结惩罚 (修复梯度悬崖)
@@ -201,7 +203,7 @@ class MADDPGFormationReward:
             team_reward -= 100.0 
             reward_details['danger'] -= 100.0
         else:
-            team_reward += 2 # 存活奖励
+            team_reward += 0.2 # 存活奖励
         
         # print(f"Reward Details: {reward_details}")
 

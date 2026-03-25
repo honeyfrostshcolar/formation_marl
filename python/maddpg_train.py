@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的批量大小")
     parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池(Replay Buffer)的最大容量")
     parser.add_argument("--sensing_radius", type=float, default=5.0, help="机器人的局部最大感知半径 (米)")
-    parser.add_argument("--render", action="store_true", default=True, help="加上这个参数就开启画面渲染 (⚠️训练时建议设为False以提升速度)")
+    parser.add_argument("--render", action="store_true", default=False, help="加上这个参数就开启画面渲染 (⚠️训练时建议设为False以提升速度)")
     
     # ==========================================
     # 二、 MADDPG 强化学习算法基础参数
@@ -103,7 +103,7 @@ def parse_args():
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers # 对齐原版变量名
     args.action_dim = 2 
-    args.obs_size = 25 
+    args.obs_size = 34
     
     return args
 
@@ -116,12 +116,12 @@ def main():
     # 1. 训练参数与工程目录设置
     # ==========================================
     train_iterations = args.train_iterations
-    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
+    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
     resume_checkpoint = None  
-    # resume_checkpoint = "/home/lpp/formation_test/data/MADDPG_Formation_2132a9_2026-03-17_21-33-40/latest_checkpoint" 
+    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e54cc4_2026-03-25_11-46-10/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
