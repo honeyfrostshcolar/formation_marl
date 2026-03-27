@@ -1,82 +1,160 @@
 # 文件路径: utils/replay_buffer.py
-import numpy as np
-import torch
 import os
 import pickle
+from typing import Dict, List
+
+import numpy as np
+import torch
+
 
 class ReplayBuffer:
     """
     专为多智能体连续控制 (MADDPG) 定制的经验回放池
     极致精简版，去除了所有离散动作和RNN序列的冗余操作
     """
-    def __init__(self, capacity, num_followers, obs_dim, action_dim, hid_size, device):
+    def __init__(self, capacity, num_followers, obs_dim, action_dim, hid_size, intent_dim, value_dim, device):
         self.capacity = int(capacity)
         self.num_followers = num_followers
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.hid_size = hid_size
+        self.intent_dim = intent_dim
+        self.value_dim = value_dim
         self.device = device
-        
-        # 预先分配内存，极大地提升运行速度 (千万不要用 Python 的 list 去 append)
-        # 状态和动作的维度都是 (容量, 小弟数量, 维度)
-        self.obs_buffer = np.zeros((self.capacity, num_followers, obs_dim), dtype=np.float32)
-        self.action_buffer = np.zeros((self.capacity, num_followers, action_dim), dtype=np.float32)
-        self.next_obs_buffer = np.zeros((self.capacity, num_followers, obs_dim), dtype=np.float32)
-        
-        # 奖励和结束标志：
-        # 因为我们只有一个上帝视角的 Critic，评价的是整个团队的表现，
-        # 所以团队奖励和结束标志只需要一维即可 (容量, 1)
-        self.reward_buffer = np.zeros((self.capacity, 1), dtype=np.float32)
-        self.done_buffer = np.zeros((self.capacity, 1), dtype=np.float32)
-        
-        self.h_in_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
-        self.c_in_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
-        self.h_out_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
-        self.c_out_buffer = np.zeros((self.capacity, num_followers, hid_size), dtype=np.float32)
 
-        # 内存指针和当前大小记录
+        c = self.capacity
+        n = num_followers
+        self.obs_buffer = np.zeros((c, n, obs_dim), dtype=np.float32)
+        self.action_buffer = np.zeros((c, n, action_dim), dtype=np.float32)
+        self.reward_buffer = np.zeros((c, 1), dtype=np.float32)
+        self.next_obs_buffer = np.zeros((c, n, obs_dim), dtype=np.float32)
+        self.done_buffer = np.zeros((c, 1), dtype=np.float32)
+
+        self.h_in_buffer = np.zeros((c, n, hid_size), dtype=np.float32)
+        self.c_in_buffer = np.zeros((c, n, hid_size), dtype=np.float32)
+        self.h_out_buffer = np.zeros((c, n, hid_size), dtype=np.float32)
+        self.c_out_buffer = np.zeros((c, n, hid_size), dtype=np.float32)
+
+        self.prev_action_buffer = np.zeros((c, n, action_dim), dtype=np.float32)
+        self.route_hard_buffer = np.zeros((c, n, n), dtype=np.float32)
+        self.route_soft_buffer = np.zeros((c, n, n), dtype=np.float32)
+
+        self.sender_intents_recv_buffer = np.zeros((c, n, n, intent_dim), dtype=np.float32)
+        self.sender_hidden_recv_buffer = np.zeros((c, n, n, hid_size), dtype=np.float32)
+        self.recv_mask_buffer = np.zeros((c, n, n), dtype=np.float32)
+        self.time_lags_buffer = np.zeros((c, n, n), dtype=np.float32)
+
+        self.episode_id_buffer = np.full((c,), -1, dtype=np.int64)
+        self.step_id_buffer = np.full((c,), -1, dtype=np.int64)
+
         self.ptr = 0
         self.size_tracker = 0
 
-    def store(self, obs, action, reward, next_obs, done, h_in, c_in, h_out, c_out):
+    def store(self, transition : dict):
         """
         存入一步经验 (transition)
         obs, action, next_obs 是 numpy 数组，形状应为 (num_followers, dim)
         reward, done 是单个浮点数 (团队总奖励，团队是否全剧终)
         """
-        self.obs_buffer[self.ptr] = obs
-        self.action_buffer[self.ptr] = action
-        self.reward_buffer[self.ptr] = reward
-        self.next_obs_buffer[self.ptr] = next_obs
-        self.done_buffer[self.ptr] = done
-        
-        self.h_in_buffer[self.ptr] = h_in
-        self.c_in_buffer[self.ptr] = c_in
-        self.h_out_buffer[self.ptr] = h_out
-        self.c_out_buffer[self.ptr] = c_out
+        i = self.ptr
+
+        self.obs_buffer[i] = transition["obs"]
+        self.action_buffer[i] = transition["action"]
+        self.reward_buffer[i] = transition["reward"]
+        self.next_obs_buffer[i] = transition["next_obs"]
+        self.done_buffer[i] = transition["done"]
+
+        self.h_in_buffer[i] = transition["h_in"]
+        self.c_in_buffer[i] = transition["c_in"]
+        self.h_out_buffer[i] = transition["h_out"]
+        self.c_out_buffer[i] = transition["c_out"]
+
+        self.prev_action_buffer[i] = transition["prev_action"]  # 上一时刻动作向量
+        self.route_hard_buffer[i] = transition["route_hard"]  # 硬路由矩阵
+        self.route_soft_buffer[i] = transition["route_soft"]  # 软路由矩阵
+
+        self.sender_intents_recv_buffer[i] = transition["sender_intents_recv"]  # 接收者视角下，每个发送者的意图
+        self.sender_hidden_recv_buffer[i] = transition["sender_hidden_recv"]  # 接收者看到的发送者隐藏状态
+        self.recv_mask_buffer[i] = transition["recv_mask"]  # 接收者视角下，每个接收者实际收到了哪些发送者的消息
+        self.time_lags_buffer[i] = transition["time_lags"]  # 每个消息的延迟（当前步减去消息发送步），0表示刚收到，正数表示消息是几秒前发送的。
+
+        self.episode_id_buffer[i] = transition["episode_id"]  # episode id
+        self.step_id_buffer[i] = transition["step_id"]  # step id
 
         # 环形缓冲区逻辑：满了就从头开始覆盖最老的数据
         self.ptr = (self.ptr + 1) % self.capacity
         self.size_tracker = min(self.size_tracker + 1, self.capacity)
 
-    def sample(self, batch_size):
-        """
-        随机抽样一批经验给算法训练
-        直接在函数内部转换为 PyTorch 的 Tensor 并推送到 GPU
-        """
-        # 随机生成 batch_size 个索引
+    def _to_tensor_batch(self, data: np.ndarray) -> torch.Tensor:
+        return torch.as_tensor(data, dtype=torch.float32, device=self.device)
+
+    def sample_transitions(self, batch_size: int) -> Dict[str, torch.Tensor]:
         idxs = np.random.choice(self.size_tracker, batch_size, replace=False)
-        
-        # 直接切片并转换为 Tensor
-        obs_batch = torch.FloatTensor(self.obs_buffer[idxs]).to(self.device)
-        action_batch = torch.FloatTensor(self.action_buffer[idxs]).to(self.device)
-        reward_batch = torch.FloatTensor(self.reward_buffer[idxs]).to(self.device)
-        next_obs_batch = torch.FloatTensor(self.next_obs_buffer[idxs]).to(self.device)
-        done_batch = torch.FloatTensor(self.done_buffer[idxs]).to(self.device)
-        
-        h_in_batch = torch.FloatTensor(self.h_in_buffer[idxs]).to(self.device)
-        c_in_batch = torch.FloatTensor(self.c_in_buffer[idxs]).to(self.device)
-        h_out_batch = torch.FloatTensor(self.h_out_buffer[idxs]).to(self.device)
-        c_out_batch = torch.FloatTensor(self.c_out_buffer[idxs]).to(self.device)
-        
-        return obs_batch, action_batch, reward_batch, next_obs_batch, done_batch, h_in_batch, c_in_batch, h_out_batch, c_out_batch
+        return {
+            "obs": self._to_tensor_batch(self.obs_buffer[idxs]),
+            "action": self._to_tensor_batch(self.action_buffer[idxs]),
+            "reward": self._to_tensor_batch(self.reward_buffer[idxs]),
+            "next_obs": self._to_tensor_batch(self.next_obs_buffer[idxs]),
+            "done": self._to_tensor_batch(self.done_buffer[idxs]),
+            "h_in": self._to_tensor_batch(self.h_in_buffer[idxs]),
+            "c_in": self._to_tensor_batch(self.c_in_buffer[idxs]),
+            "h_out": self._to_tensor_batch(self.h_out_buffer[idxs]),
+            "c_out": self._to_tensor_batch(self.c_out_buffer[idxs]),
+            "prev_action": self._to_tensor_batch(self.prev_action_buffer[idxs]),
+            "route_hard": self._to_tensor_batch(self.route_hard_buffer[idxs]),
+            "route_soft": self._to_tensor_batch(self.route_soft_buffer[idxs]),
+            "sender_intents_recv": self._to_tensor_batch(self.sender_intents_recv_buffer[idxs]),
+            "sender_hidden_recv": self._to_tensor_batch(self.sender_hidden_recv_buffer[idxs]),
+            "recv_mask": self._to_tensor_batch(self.recv_mask_buffer[idxs]),
+            "time_lags": self._to_tensor_batch(self.time_lags_buffer[idxs]),
+        }
+
+    def _is_valid_anchor(self, idx: int, pred_horizon: int) -> bool:
+        if idx <= 0:
+            return False
+        if idx + pred_horizon - 1 >= self.size_tracker:
+            return False
+        ep = self.episode_id_buffer[idx]
+        if ep < 0:
+            return False
+        # 需要 t-1 到 t+K-1 全在同一条 episode 里，并且 step 连续
+        indices = list(range(idx - 1, idx + pred_horizon))
+        eps = self.episode_id_buffer[indices]
+        steps = self.step_id_buffer[indices]
+        if not np.all(eps == ep):
+            return False
+        return np.all(np.diff(steps) == 1)
+
+    def sample_intent_sequences(self, batch_size: int, pred_horizon: int) -> Dict[str, torch.Tensor]:
+        valid: List[int] = [i for i in range(self.size_tracker) if self._is_valid_anchor(i, pred_horizon)]
+        if len(valid) < batch_size:
+            raise ValueError(f"Not enough valid intent sequences: need {batch_size}, have {len(valid)}")
+        anchors = np.random.choice(valid, batch_size, replace=False)
+
+        h_prev = self.h_out_buffer[anchors - 1]
+        prev_action_prev = self.prev_action_buffer[anchors - 1]
+        h_curr = self.h_out_buffer[anchors]
+        prev_action_curr = self.prev_action_buffer[anchors]
+
+        obs_decode = np.stack(
+            [self.obs_buffer[a: a + pred_horizon] for a in anchors], axis=0
+        )  # [B, K, N, O]
+        target_action_seq = np.stack(
+            [self.action_buffer[a: a + pred_horizon] for a in anchors], axis=0
+        )  # [B, K, N, A]
+
+        # 转成 [B, N, K, *]，便于后面 flatten(B*N)
+        obs_decode = np.transpose(obs_decode, (0, 2, 1, 3))
+        target_action_seq = np.transpose(target_action_seq, (0, 2, 1, 3))
+
+        return {
+            "h_prev": self._to_tensor_batch(h_prev),
+            "prev_action_prev": self._to_tensor_batch(prev_action_prev),
+            "h_curr": self._to_tensor_batch(h_curr),
+            "prev_action_curr": self._to_tensor_batch(prev_action_curr),
+            "obs_decode": self._to_tensor_batch(obs_decode),
+            "target_action_seq": self._to_tensor_batch(target_action_seq),
+        }
     
     # ==========================================
     # ✅ 修复后：把整个脑子（记忆矩阵）打包存到硬盘

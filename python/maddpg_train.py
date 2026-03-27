@@ -98,6 +98,26 @@ def parse_args():
     parser.add_argument("--message_decoder", action="store_true", default=False, help="在收到全局消息后，是否先通过一个全连接层进行解码再输入动作网络")
     parser.add_argument("--comm_init", type=str, default="zeros", help="通信相关网络全连接层权重的初始赋零方式 (如 'zeros' 防止初始通信引发混乱)")
 
+    # [新增] CoDe 相关
+    parser.add_argument("--intent_dim", type=int, default=32)
+    parser.add_argument("--decoder_hidden_dim", type=int, default=64)
+    parser.add_argument("--value_dim", type=int, default=64)
+    parser.add_argument("--attn_dim", type=int, default=32)
+    parser.add_argument("--gamma_t", type=float, default=0.90)
+    parser.add_argument("--lambda_inf", type=float, default=1.0)
+    parser.add_argument("--lambda_c", type=float, default=0.1)
+    parser.add_argument("--lambda_k", type=float, default=1e-3)
+    parser.add_argument("--lambda_e", type=float, default=1e-3)
+    parser.add_argument("--eps", type=float, default=1e-8)
+    parser.add_argument("--renorm_after_decay", action="store_true", default=False)
+    parser.add_argument("--pred_horizon", type=int, default=4)
+
+    # [新增] 延迟相关
+    parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"])
+    parser.add_argument("--fixed_delay", type=int, default=2)
+    parser.add_argument("--min_delay", type=int, default=1)
+    parser.add_argument("--max_delay", type=int, default=3)
+
     args = parser.parse_args()
     
     args.num_followers = args.num_robots - 1
@@ -182,16 +202,18 @@ def main():
 
         obs_dict, _ = env.reset()
         obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids])
+        
 
         h_in, c_in = agent.init_hidden()
-        
+        agent.reset_runtime()  # [新增] 每个 episode 都清 runtime delay buffer
+
         episode_reward = 0.0
-        episode_actor_loss = []
-        episode_critic_loss = []
+        actor_losses = []
+        critic_losses = []
         
         for step in range(args.max_steps):
             # 前向决策
-            actions_array, graphs_array, graphs_soft_array, h_out, c_out = agent.select_action(
+            actions_array, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
                 obs_array, h_in, c_in, add_noise=True, noise_scale=current_noise
             )
             action_dict = {env._agent_ids[i]: actions_array[i] for i in range(args.num_followers)}
@@ -209,32 +231,43 @@ def main():
             
             # 存入经验池
             # 存入 Buffer 时，把旧记忆(in)和新记忆(out)一起转成 numpy 存进去
-            buffer.store(
-                obs_array, actions_array, float(team_reward), next_obs_array, float(team_done),
-                h_in.squeeze(0).cpu().numpy(), c_in.squeeze(0).cpu().numpy(),
-                h_out.squeeze(0).cpu().numpy(), c_out.squeeze(0).cpu().numpy()
-            )
-            episode_reward += team_reward
-            obs_array = next_obs_array
-            h_in = h_out
-            c_in = c_out
+            buffer.store({
+                "obs": obs_array,
+                "action": actions_array,
+                "reward": float(team_reward),
+                "next_obs": next_obs_array,
+                "done": float(team_done),
+                "h_in": h_in.squeeze(0).cpu().numpy(),
+                "c_in": c_in.squeeze(0).cpu().numpy(),
+                "h_out": h_out.squeeze(0).cpu().numpy(),
+                "c_out": c_out.squeeze(0).cpu().numpy(),
+                "prev_action": comm_snapshot["prev_action"],
+                "route_hard": comm_snapshot["route_hard"],
+                "route_soft": comm_snapshot["route_soft"],
+                "sender_intents_recv": comm_snapshot["sender_intents_recv"],
+                "sender_hidden_recv": comm_snapshot["sender_hidden_recv"],
+                "recv_mask": comm_snapshot["recv_mask"],
+                "time_lags": comm_snapshot["time_lags"],
+                "episode_id": episode,
+                "step_id": step,
+            })
 
-            # 核心：更新网络
-            learning_starts = 5000  # 先积累一些经验再开始学习
-            if buffer.size() >= learning_starts:
-                sample_batch = buffer.sample(batch_size)
-                a_loss, c_loss = agent.update(sample_batch)
-                episode_actor_loss.append(a_loss)
-                episode_critic_loss.append(c_loss)
-            
             obs_array = next_obs_array
+            h_in, c_in = h_out, c_out
+            episode_reward += team_reward
+
+            learning_starts = 2000  # 先积累一些经验再开始学习
+            if buffer.size() >= learning_starts:
+                metrics = agent.update(buffer)
+                actor_losses.append(metrics["actor_total_loss"])
+                critic_losses.append(metrics["critic_loss"])
             
             if team_done:
                 break
                 
         # 计算整局平均 Loss
-        avg_a_loss = np.mean(episode_actor_loss) if episode_actor_loss else 0.0
-        avg_c_loss = np.mean(episode_critic_loss) if episode_critic_loss else 0.0
+        avg_a_loss = np.mean(actor_losses) if actor_losses else 0.0
+        avg_c_loss = np.mean(critic_losses) if critic_losses else 0.0
 
         step_avg_reward = episode_reward / (step + 1)
 
