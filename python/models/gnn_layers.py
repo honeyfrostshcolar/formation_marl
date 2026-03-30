@@ -78,14 +78,7 @@ class GraphAttention(nn.Module):
         # [B, N, in] @ [in, H*out] -> [B, N, H, out]
         h = torch.matmul(x, self.W).view(B, N, self.num_heads, self.out_features)
 
-
-
-
-        magic是有多头注意力机制的，每个头都有自己的权重和偏置，最后将所有头的输出进行拼接
-
-
-
-
+        # magic是有多头注意力机制的，每个头都有自己的权重和偏置，最后将所有头的输出进行拼接
 
         # 动态设备分配，避免 CPU Tensor 报错
         eye = torch.eye(N, N, device=x.device, dtype=x.dtype).unsqueeze(0).expand(B, N, N)

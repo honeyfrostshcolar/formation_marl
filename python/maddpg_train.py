@@ -44,87 +44,105 @@ def load_checkpoint(agent, path):
     return 0
 
 def parse_args():
-    parser = argparse.ArgumentParser("MADDPG + MAGIC (LSTM) for Formation Control")
-    
-    # ==========================================
-    # 一、 环境与训练总体参数
-    # ==========================================
-    parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量 (包含1个领航者和N个跟随者)")
-    parser.add_argument("--max_steps", type=int, default=1000, help="每回合(Episode)环境交互的最大步数限制")
-    parser.add_argument("--train_iterations", type=int, default=5000, help="总训练回合数 (Episodes)")
-    parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的批量大小")
-    parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池(Replay Buffer)的最大容量")
-    parser.add_argument("--sensing_radius", type=float, default=5.0, help="机器人的局部最大感知半径 (米)")
-    parser.add_argument("--render", action="store_true", default=False, help="加上这个参数就开启画面渲染 (⚠️训练时建议设为False以提升速度)")
-    
-    # ==========================================
-    # 二、 MADDPG 强化学习算法基础参数
-    # ==========================================
-    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor 策略网络的学习率")
-    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic 价值网络的学习率")
-    parser.add_argument("--gamma", type=float, default=0.99, help="强化学习奖励折扣因子 (Gamma，越接近1越看重长期收益)")
-    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数 (Tau，控制新老权重融合比例)")
-    
-    # ==========================================
-    # 三、 MAGIC (多智能体图注意力通信) 核心架构参数
-    # ==========================================
-    # 3.1 基础维度设置
-    parser.add_argument("--hid_size", type=int, default=64, help="所有 MLP 隐藏层及 LSTM 记忆单元的特征维度")
-    parser.add_argument("--gat_hid_size", type=int, default=64, help="子处理器(GAT)内部进行图通信聚合时的特征维度")
-    
-    # 3.2 图注意力层(GAT)配置
-    parser.add_argument("--gat_num_heads", type=int, default=4, help="第一轮通信 GAT 层使用的多头注意力(Multi-head)数量")
-    parser.add_argument("--gat_num_heads_out", type=int, default=1, help="第二轮通信 GAT 层使用的多头注意力数量")
-    parser.add_argument("--self_loop_type1", type=int, default=2, help="第一层GAT自环类型 (0:强行无自环, 1:强行加自环, 2:完全由调度器学习决定)")
-    parser.add_argument("--self_loop_type2", type=int, default=2, help="第二层GAT自环类型 (0:强行无自环, 1:强行加自环, 2:完全由调度器学习决定)")
-    parser.add_argument("--first_gat_normalize", action="store_true", default=False, help="是否对第一层 GAT 计算出的注意力权重进行归一化")
-    parser.add_argument("--second_gat_normalize", action="store_true", default=False, help="是否对第二层 GAT 计算出的注意力权重进行归一化")
-    
-    # 3.3 子调度器(Sub-scheduler)图生成控制
-    parser.add_argument("--use_gat_encoder", action="store_true", default=False, help="调度器在决定谁跟谁通信前，是否先用额外的 GAT 编码器提取特征 (否则用普通MLP)")
-    parser.add_argument("--first_graph_complete", action="store_true", default=False, help="第一轮通信是否跳过调度网络，强行让所有人建立全连接图通信")
-    parser.add_argument("--learn_second_graph", action="store_true", default=True, help="是否激活第二个调度网络来动态学习第二轮的通信拓扑图")
-    parser.add_argument("--second_graph_complete", action="store_true", default=False, help="第二轮通信是否跳过调度网络，强行让所有人建立全连接图通信")
-    parser.add_argument("--directed", action="store_true", default=True, help="学习出的通信图是否有向 (True=有向图，即A理B但不代表B理A; False=无向图)")
-    parser.add_argument("--comm_mask_zero", action="store_true", default=False, help="是否强行切断所有人的通信 (仅用于做消融实验，证明通信的必要性)")
-    
-    # 3.4 调度器 GAT 编码器专属参数 (仅在 use_gat_encoder=True 时生效)
-    parser.add_argument("--gat_encoder_out_size", type=int, default=64, help="调度器专属 GAT 编码器输出的隐藏层维度")
-    parser.add_argument("--ge_num_heads", type=int, default=4, help="调度器专属 GAT 编码器的多头注意力数量")
-    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False, help="调度器专属 GAT 编码器是否进行注意力权重归一化")
-    
-    # 3.5 消息的额外加工层
-    parser.add_argument("--message_encoder", action="store_true", default=False, help="在把隐藏状态当作消息发出去之前，是否先通过一个全连接层进行预处理")
-    parser.add_argument("--message_decoder", action="store_true", default=False, help="在收到全局消息后，是否先通过一个全连接层进行解码再输入动作网络")
-    parser.add_argument("--comm_init", type=str, default="zeros", help="通信相关网络全连接层权重的初始赋零方式 (如 'zeros' 防止初始通信引发混乱)")
+    parser = argparse.ArgumentParser(description="MADDPG + MAGIC Scheduler + CoDe Delay-aware Fusion for multi-robot formation control")
 
-    # [新增] CoDe 相关
-    parser.add_argument("--intent_dim", type=int, default=32)
-    parser.add_argument("--decoder_hidden_dim", type=int, default=64)
-    parser.add_argument("--value_dim", type=int, default=64)
-    parser.add_argument("--attn_dim", type=int, default=32)
-    parser.add_argument("--gamma_t", type=float, default=0.90)
-    parser.add_argument("--lambda_inf", type=float, default=1.0)
-    parser.add_argument("--lambda_c", type=float, default=0.1)
-    parser.add_argument("--lambda_k", type=float, default=1e-3)
-    parser.add_argument("--lambda_e", type=float, default=1e-3)
-    parser.add_argument("--eps", type=float, default=1e-8)
-    parser.add_argument("--renorm_after_decay", action="store_true", default=False)
-    parser.add_argument("--pred_horizon", type=int, default=4)
+    # =========================================================
+    # 一、环境与训练总体参数
+    # =========================================================
+    parser.add_argument("--num_robots", type=int, default=3, help="环境中的总机器人数量，包含 1 个 leader 和 N-1 个 follower。")
+    parser.add_argument("--max_steps", type=int, default=1000, help="每个 episode 的最大交互步数，达到后即超时终止。")
+    parser.add_argument("--train_iterations", type=int, default=10000, help="总训练回合数（episode 数）。")
+    parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的 batch 大小。")
+    parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池最多可存储的 transition 数量。")
+    parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
+    parser.add_argument("--render", action="store_true", default=False, help="是否开启环境渲染。训练时通常关闭以提升速度。")
 
-    # [新增] 延迟相关
-    parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"])
-    parser.add_argument("--fixed_delay", type=int, default=2)
-    parser.add_argument("--min_delay", type=int, default=1)
-    parser.add_argument("--max_delay", type=int, default=3)
+    # =========================================================
+    # 二、MADDPG 强化学习参数
+    # =========================================================
+    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor（策略网络）的学习率。")
+    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic（价值网络）的学习率。")
+    parser.add_argument("--gamma", type=float, default=0.99, help="奖励折扣因子 gamma，越接近 1 越重视长期回报。")
+    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数 tau。")
+
+    # =========================================================
+    # 三、MAGIC 调度器 / 通信拓扑参数
+    # =========================================================
+    parser.add_argument("--hid_size", type=int, default=64, help="LSTM 隐状态维度，同时也是大多数 MLP 的基础隐藏维度。")
+    parser.add_argument("--gat_hid_size", type=int, default=64, help="GAT 中间特征维度。当前如果只保留 scheduler，可主要作为兼容参数保留。")
+    parser.add_argument("--gat_num_heads", type=int, default=4, help="第一轮 GAT 使用的多头注意力头数。")
+    parser.add_argument("--gat_num_heads_out", type=int, default=1, help="第二轮 GAT 使用的多头注意力头数。")
+    parser.add_argument("--self_loop_type1", type=int, default=2, help="第一层自环控制方式：0=无自环，1=强制自环，2=由调度机制控制。")
+    parser.add_argument("--self_loop_type2", type=int, default=2, help="第二层自环控制方式：0=无自环，1=强制自环，2=由调度机制控制。")
+    parser.add_argument("--first_gat_normalize", action="store_true", default=False, help="是否对第一层 GAT 的注意力权重做归一化。")
+    parser.add_argument("--second_gat_normalize", action="store_true", default=False, help="是否对第二层 GAT 的注意力权重做归一化。")
+    parser.add_argument("--use_gat_encoder", action="store_true", default=False, help="是否在 scheduler 前使用额外的 GAT 编码器提取全局关系特征。")
+    parser.add_argument("--first_graph_complete", action="store_true", default=False, help="是否令第一轮通信图强制为全连接图，而不经过第一轮调度器学习。")
+    parser.add_argument("--learn_second_graph", dest="learn_second_graph", action="store_true", help="是否启用第二轮调度器学习第二张通信图。")
+    parser.add_argument("--no_learn_second_graph", dest="learn_second_graph", action="store_false", help="是否关闭第二轮调度器，只保留第一轮通信图。")
+    parser.set_defaults(learn_second_graph=True)
+    parser.add_argument("--second_graph_complete", action="store_true", default=False, help="是否令第二轮通信图强制为全连接图，而不经过第二轮调度器学习。")
+    parser.add_argument("--directed", dest="directed", action="store_true", help="使用有向通信图，表示 A->B 和 B->A 可以不同。")
+    parser.add_argument("--undirected", dest="directed", action="store_false", help="使用无向通信图，表示 A<->B 对称。")
+    parser.set_defaults(directed=True)
+    parser.add_argument("--comm_mask_zero", action="store_true", default=False, help="将通信图强制置零，用于做无通信消融实验。")
+
+    # =========================================================
+    # 四、Scheduler 专属 GAT 编码器参数
+    # =========================================================
+    parser.add_argument("--gat_encoder_out_size", type=int, default=64, help="scheduler 专属 GAT encoder 的输出维度。")
+    parser.add_argument("--ge_num_heads", type=int, default=4, help="scheduler 专属 GAT encoder 的多头注意力头数。")
+    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False, help="scheduler 专属 GAT encoder 是否对注意力权重做归一化。")
+
+    # =========================================================
+    # 五、消息前处理 / 后处理
+    # =========================================================
+    parser.add_argument("--message_encoder", action="store_true", default=False, help="是否在发送端对 hidden state 先做一层线性映射后再作为消息发送。")
+    parser.add_argument("--message_decoder", action="store_true", default=False, help="是否在接收端对融合后的消息再做一层线性映射。")
+    parser.add_argument("--comm_init", type=str, default="zeros", help="通信相关层的初始化方式。通常 'zeros' 可减轻训练初期通信震荡。")
+
+    # =========================================================
+    # 六、CoDe：发送端意图建模参数
+    # =========================================================
+    parser.add_argument("--intent_dim", type=int, default=32, help="意图向量 e_t 的维度。")
+    parser.add_argument("--decoder_hidden_dim", type=int, default=64, help="发送端 Intent Decoder 中 GRU 解码器的隐藏状态维度。")
+    parser.add_argument("--pred_horizon", type=int, default=4, help="发送端 decoder 预测未来动作的时间跨度 K。")
+
+    # =========================================================
+    # 七、CoDe：接收端双对齐融合参数
+    # =========================================================
+    parser.add_argument("--value_dim", type=int, default=64, help="接收端融合后消息向量 c_t 的维度。")
+    parser.add_argument("--attn_dim", type=int, default=32, help="intent alignment 中 query/key 的投影维度。")
+    parser.add_argument("--gamma_t", type=float, default=0.90, help="timeliness alignment 中的时间衰减系数，越小表示越惩罚旧消息。")
+    parser.add_argument("--renorm_after_decay", action="store_true", default=False, help="是否在时间衰减后对 attention 权重重新归一化。默认按论文正文不重新归一化。")
+
+    # =========================================================
+    # 八、CoDe：损失函数权重参数
+    # =========================================================
+    parser.add_argument("--lambda_inf", type=float, default=1.0, help="未来动作推断损失 L_inf 的权重。")
+    parser.add_argument("--lambda_c", type=float, default=0.1, help="意图连续性损失 L_c 的权重。")
+    parser.add_argument("--lambda_k", type=float, default=1e-3, help="KL 正则损失 L_k 的权重。")
+    parser.add_argument("--lambda_e", type=float, default=1e-3, help="接收端 dual alignment 中熵正则项 L_e 的权重。")
+    parser.add_argument("--eps", type=float, default=1e-8, help="数值稳定项，防止除零或 log(0)。")
+
+    # =========================================================
+    # 九、延迟通信设置
+    # =========================================================
+    parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"], help="通信延迟模式：none=无延迟，fixed=固定延迟，uniform=随机均匀延迟。")
+    parser.add_argument("--fixed_delay", type=int, default=2, help="当 delay_mode=fixed 时，所有 sender->receiver 边统一采用的固定延迟步数。")
+    parser.add_argument("--min_delay", type=int, default=1, help="当 delay_mode=uniform 时，最小延迟步数。")
+    parser.add_argument("--max_delay", type=int, default=3, help="当 delay_mode=uniform 时，最大延迟步数。")
 
     args = parser.parse_args()
-    
+
+    # =========================================================
+    # 十、自动派生参数
+    # =========================================================
     args.num_followers = args.num_robots - 1
-    args.nagents = args.num_followers # 对齐原版变量名
-    args.action_dim = 2 
+    args.nagents = args.num_followers
+    args.action_dim = 2
     args.obs_size = 34
-    
+
     return args
 
 def main():
@@ -140,8 +158,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e54cc4_2026-03-25_11-46-10/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -168,8 +186,7 @@ def main():
     # ==========================================
     env = Formation2DMultiAgentEnv(config)
     agent = MADDPG_Agent(args)
-    buffer = ReplayBuffer(args.buffer_capacity, args.num_followers, args.obs_size, args.action_dim, args.hid_size, device)
-    
+    buffer = ReplayBuffer(args.buffer_capacity, args.num_followers, args.obs_size, args.action_dim, args.hid_size, args.intent_dim, args.value_dim ,device)
     batch_size = args.batch_size # 每次更新的批量大小
 
     # ==========================================
@@ -213,10 +230,10 @@ def main():
         
         for step in range(args.max_steps):
             # 前向决策
-            actions_array, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
+            action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
                 obs_array, h_in, c_in, add_noise=True, noise_scale=current_noise
             )
-            action_dict = {env._agent_ids[i]: actions_array[i] for i in range(args.num_followers)}
+            action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
             graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
             graphs_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
 
@@ -233,7 +250,8 @@ def main():
             # 存入 Buffer 时，把旧记忆(in)和新记忆(out)一起转成 numpy 存进去
             buffer.store({
                 "obs": obs_array,
-                "action": actions_array,
+                "action_exec" : action_exec,        # 给 critic / 环境
+                "action_policy" : action_policy,    # 给 CoDe decoder
                 "reward": float(team_reward),
                 "next_obs": next_obs_array,
                 "done": float(team_done),
@@ -259,7 +277,7 @@ def main():
             learning_starts = 2000  # 先积累一些经验再开始学习
             if buffer.size() >= learning_starts:
                 metrics = agent.update(buffer)
-                actor_losses.append(metrics["actor_total_loss"])
+                actor_losses.append(metrics["actor_loss"])
                 critic_losses.append(metrics["critic_loss"])
             
             if team_done:

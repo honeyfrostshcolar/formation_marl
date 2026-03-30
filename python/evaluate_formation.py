@@ -4,150 +4,203 @@ import argparse
 import numpy as np
 import torch
 
-from envs.formation_2d_env import Formation2DMultiAgentEnv 
-from agents.maddpg_agent import MADDPG_Agent             
+from envs.formation_2d_env import Formation2DMultiAgentEnv
+from agents.maddpg_agent import MADDPG_Agent
+
 
 # ==========================================
-# 0. 统一参数解析 (必须与训练时保持完全一致)
+# 0. 参数解析（必须与训练时网络结构保持一致）
 # ==========================================
 def parse_args():
-    parser = argparse.ArgumentParser("MADDPG + MAGIC (LSTM) Evaluation")
-    
-    # 环境参数 (默认展示 4 辆车的编队)
-    parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量(包含1个领航者)")
-    parser.add_argument("--max_steps", type=int, default=1000, help="每回合最大步数")
-    parser.add_argument("--sensing_radius", type=float, default=5.0, help="感知半径")
-    
-    # 强化学习基础参数 (评估时其实用不到，但为了初始化 Agent 不报错必须留着)
-    parser.add_argument("--lr_actor", type=float, default=5e-5)
-    parser.add_argument("--lr_critic", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--tau", type=float, default=0.005)
-    
-    # MAGIC 网络结构参数 (必须和训练时一模一样！)
-    parser.add_argument("--hid_size", type=int, default=64)
-    parser.add_argument("--gat_hid_size", type=int, default=64)
-    parser.add_argument("--gat_num_heads", type=int, default=4)
-    parser.add_argument("--gat_num_heads_out", type=int, default=1)
-    parser.add_argument("--self_loop_type1", type=int, default=2)
-    parser.add_argument("--self_loop_type2", type=int, default=2)
-    parser.add_argument("--first_gat_normalize", action="store_true", default=False)
-    parser.add_argument("--second_gat_normalize", action="store_true", default=False)
-    
-    parser.add_argument("--use_gat_encoder", action="store_true", default=False)
-    parser.add_argument("--first_graph_complete", action="store_true", default=False)
-    parser.add_argument("--learn_second_graph", action="store_true", default=True)
-    parser.add_argument("--second_graph_complete", action="store_true", default=False)
-    parser.add_argument("--message_encoder", action="store_true", default=False)
-    parser.add_argument("--message_decoder", action="store_true", default=False)
-    parser.add_argument("--comm_init", type=str, default="zeros")
-    parser.add_argument("--directed", action="store_true", default=True)
-    parser.add_argument("--comm_mask_zero", action="store_true", default=False)
-    parser.add_argument("--gat_encoder_out_size", type=int, default=64)
-    parser.add_argument("--ge_num_heads", type=int, default=4)
-    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False)
+    parser = argparse.ArgumentParser(
+        description="MADDPG + MAGIC Scheduler + CoDe Evaluation"
+    )
+
+    # =========================================================
+    # 一、环境参数
+    # =========================================================
+    parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量，包含 1 个 leader 和 N-1 个 follower。")
+    parser.add_argument("--max_steps", type=int, default=1000, help="每个评估 episode 的最大步数。")
+    parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径。")
+
+    # =========================================================
+    # 二、MADDPG 基础参数（评估时主要为了初始化 Agent）
+    # =========================================================
+    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor 学习率，占位参数，评估时不更新。")
+    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic 学习率，占位参数，评估时不更新。")
+    parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子，占位参数。")
+    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数，占位参数。")
+
+    # =========================================================
+    # 三、MAGIC 调度器参数
+    # =========================================================
+    parser.add_argument("--hid_size", type=int, default=64, help="LSTM 隐状态维度。")
+    parser.add_argument("--gat_hid_size", type=int, default=64, help="GAT 中间特征维度。")
+    parser.add_argument("--gat_num_heads", type=int, default=4, help="第一轮 GAT 多头数。")
+    parser.add_argument("--gat_num_heads_out", type=int, default=1, help="第二轮 GAT 多头数。")
+    parser.add_argument("--self_loop_type1", type=int, default=2, help="第一层自环控制方式。")
+    parser.add_argument("--self_loop_type2", type=int, default=2, help="第二层自环控制方式。")
+    parser.add_argument("--first_gat_normalize", action="store_true", default=False, help="是否对第一层 GAT 注意力归一化。")
+    parser.add_argument("--second_gat_normalize", action="store_true", default=False, help="是否对第二层 GAT 注意力归一化。")
+
+    parser.add_argument("--use_gat_encoder", action="store_true", default=False, help="是否启用 scheduler 前的 GAT encoder。")
+    parser.add_argument("--first_graph_complete", action="store_true", default=False, help="第一轮通信图是否强制全连接。")
+
+    parser.add_argument("--learn_second_graph", dest="learn_second_graph", action="store_true", help="是否启用第二轮调度器。")
+    parser.add_argument("--no_learn_second_graph", dest="learn_second_graph", action="store_false", help="是否关闭第二轮调度器。")
+    parser.set_defaults(learn_second_graph=True)
+
+    parser.add_argument("--second_graph_complete", action="store_true", default=False, help="第二轮通信图是否强制全连接。")
+
+    parser.add_argument("--directed", dest="directed", action="store_true", help="使用有向通信图。")
+    parser.add_argument("--undirected", dest="directed", action="store_false", help="使用无向通信图。")
+    parser.set_defaults(directed=True)
+
+    parser.add_argument("--comm_mask_zero", action="store_true", default=False, help="是否强制关闭通信。")
+
+    parser.add_argument("--gat_encoder_out_size", type=int, default=64, help="scheduler 专属 GAT encoder 输出维度。")
+    parser.add_argument("--ge_num_heads", type=int, default=4, help="scheduler 专属 GAT encoder 多头数。")
+    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False, help="scheduler 专属 GAT encoder 是否归一化。")
+
+    parser.add_argument("--message_encoder", action="store_true", default=False, help="发送端是否对 hidden state 再做一层消息映射。")
+    parser.add_argument("--message_decoder", action="store_true", default=False, help="接收端是否对融合消息再做一层映射。")
+    parser.add_argument("--comm_init", type=str, default="zeros", help="通信模块初始化方式。")
+
+    # =========================================================
+    # 四、CoDe 参数
+    # =========================================================
+    parser.add_argument("--intent_dim", type=int, default=32, help="意图向量维度。")
+    parser.add_argument("--decoder_hidden_dim", type=int, default=64, help="Intent Decoder 的 GRU hidden 维度。")
+    parser.add_argument("--value_dim", type=int, default=64, help="接收端融合消息向量维度。")
+    parser.add_argument("--attn_dim", type=int, default=32, help="Q/K 投影维度。")
+    parser.add_argument("--gamma_t", type=float, default=0.90, help="消息时间衰减系数。")
+    parser.add_argument("--lambda_inf", type=float, default=1.0, help="L_inf 权重，占位参数。")
+    parser.add_argument("--lambda_c", type=float, default=0.1, help="L_c 权重，占位参数。")
+    parser.add_argument("--lambda_k", type=float, default=1e-3, help="L_k 权重，占位参数。")
+    parser.add_argument("--lambda_e", type=float, default=1e-3, help="L_e 权重，占位参数。")
+    parser.add_argument("--eps", type=float, default=1e-8, help="数值稳定项。")
+    parser.add_argument("--renorm_after_decay", action="store_true", default=False, help="时间衰减后是否重新归一化注意力。")
+    parser.add_argument("--pred_horizon", type=int, default=4, help="发送端 decoder 预测未来动作的步数 K。")
+
+    # =========================================================
+    # 五、延迟设置
+    # =========================================================
+    parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"], help="通信延迟模式。")
+    parser.add_argument("--fixed_delay", type=int, default=2, help="固定延迟模式下的延迟步数。")
+    parser.add_argument("--min_delay", type=int, default=1, help="随机延迟模式下的最小延迟。")
+    parser.add_argument("--max_delay", type=int, default=3, help="随机延迟模式下的最大延迟。")
 
     args = parser.parse_args()
-    
+
+    # =========================================================
+    # 六、派生参数
+    # =========================================================
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
-    args.action_dim = 2 
-    
+    args.action_dim = 2
     args.obs_size = 34
-    
+
     return args
 
+
 # ==========================================
-# 辅助函数：只加载模型权重
+# 1. 只加载模型权重
 # ==========================================
 def load_evaluate_model(agent, path):
     checkpoint_file = os.path.join(path, "maddpg_checkpoint.pt")
     if not os.path.exists(checkpoint_file):
-        raise FileNotFoundError(f"🚨 找不到模型文件，请检查路径: {checkpoint_file}")
-    
+        raise FileNotFoundError(f"找不到模型文件，请检查路径: {checkpoint_file}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_file, map_location=device)
-    
-    # 评估时只需要演员(Actor)的大脑，裁判(Critic)可以休息了
-    agent.actor.load_state_dict(checkpoint['actor'])
-    print(f"✅ 成功加载第 {checkpoint['episode']} 轮的完美大脑！")
 
+    # 评估时主要使用 actor
+    agent.actor.load_state_dict(checkpoint["actor"])
+
+    # 同步 target_actor，避免内部状态不一致
+    if "target_actor" in checkpoint:
+        agent.target_actor.load_state_dict(checkpoint["target_actor"])
+    else:
+        agent.target_actor.load_state_dict(checkpoint["actor"])
+
+    print(f"✅ 成功加载第 {checkpoint['episode']} 轮的模型。")
+
+
+# ==========================================
+# 2. 主评估流程
+# ==========================================
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 评估测试启动，运行设备: {device}")
+    print(f"评估启动，运行设备: {device}")
 
-    # ==========================================
-    # 🚨 第一步：填写你最终训练的模型路径！(请替换成你真实的 latest_checkpoint 路径)
-    # ==========================================
-    model_path = "/home/nankai/formation_test/data/MADDPG_Formation_f907bf_2026-03-25_16-56-30/latest_checkpoint"
-    
-    # 获取参数
+    # 这里改成你自己的 checkpoint 路径
+    model_path = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint"
+
     args = parse_args()
 
-    # ==========================================
-    # 2. 初始化环境 (开启渲染) 和 Agent
-    # ==========================================
     config = {
-        "num_robots": args.num_robots, 
-        "max_steps": args.max_steps, 
-        "render": True,   # ✅ 必须开启渲染！我们要看动画！
-        "sensing_radius": args.sensing_radius
+        "num_robots": args.num_robots,
+        "max_steps": args.max_steps,
+        "render": True,
+        "sensing_radius": args.sensing_radius,
     }
+
     env = Formation2DMultiAgentEnv(config)
-    
-    # ✅ 核心修改：使用统一的 args 初始化 Agent
     agent = MADDPG_Agent(args)
-    
-    # 加载你的心血结晶
     load_evaluate_model(agent, model_path)
 
-    # ==========================================
-    # 3. 开始观赏表演
-    # ==========================================
-    eval_episodes = 10  # 跑 10 局看看稳定性
-    
+    eval_episodes = 10
+
     for episode in range(eval_episodes):
         obs_dict, _ = env.reset()
-        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids])
-        
-        # ✅ LSTM 核心：评估回合开始，初始化全新的空记忆！
+        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
+        # 每个 episode 初始化 LSTM 和记忆化延迟缓冲
         h_in, c_in = agent.init_hidden()
-        
+        agent.reset_runtime()
+
         episode_reward = 0.0
-        
-        for step in range(config["max_steps"]):
-            # ✅ 核心：传入 h_in, c_in，并且 add_noise=False 纯靠真实实力！
-            actions_array, graphs_array, graphs_soft_array, h_out, c_out = agent.select_action(
-                obs_array, h_in, c_in, add_noise=False
+
+        for step in range(args.max_steps):
+            # 新版接口返回 7 个量
+            action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
+                obs_array,
+                h_in,
+                c_in,
+                add_noise=False,
             )
-            
-            action_dict = {env._agent_ids[i]: actions_array[i] for i in range(args.num_followers)}
+
+            # 评估时执行无噪动作；这里 action_exec == action_policy，因为 add_noise=False
+            action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
             graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
             graph_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
-            
-            # 环境步进
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict, graph_soft_dict)
-            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids])
-            
+
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
+                action_dict,
+                graph_dict,
+                graph_soft_dict
+            )
+
+            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
             team_reward = reward_dict[env._agent_ids[0]]
             team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
-            
+
             episode_reward += team_reward
-            
-            # ✅ 记忆流动：走向下一步
+
             obs_array = next_obs_array
             h_in = h_out
             c_in = c_out
-            
-            # ✅ 为了让你肉眼能看清阵型的变化，强制加一点延时，否则画面一闪而过
-            time.sleep(0.01) 
-            
+
+            time.sleep(0.01)
+
             if team_done:
                 break
-                
-        print(f"🎬 评估测试 {episode + 1}/{eval_episodes} | 存活步数: {step+1:3d} | 总得分: {episode_reward:8.2f}")
 
-    print("\n🎉 评估结束！！")
+        print(f"评估 {episode + 1}/{eval_episodes} | 步数: {step + 1:3d} | 总得分: {episode_reward:8.2f}")
+
+    print("\n评估结束。")
+
 
 if __name__ == "__main__":
     main()

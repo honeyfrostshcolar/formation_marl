@@ -25,7 +25,10 @@ class ReplayBuffer:
         c = self.capacity
         n = num_followers
         self.obs_buffer = np.zeros((c, n, obs_dim), dtype=np.float32)
-        self.action_buffer = np.zeros((c, n, action_dim), dtype=np.float32)
+        
+        self.action_exec_buffer = np.zeros((c, n, action_dim), dtype=np.float32)
+        self.action_policy_buffer = np.zeros((c, n, action_dim), dtype=np.float32)
+
         self.reward_buffer = np.zeros((c, 1), dtype=np.float32)
         self.next_obs_buffer = np.zeros((c, n, obs_dim), dtype=np.float32)
         self.done_buffer = np.zeros((c, 1), dtype=np.float32)
@@ -59,7 +62,9 @@ class ReplayBuffer:
         i = self.ptr
 
         self.obs_buffer[i] = transition["obs"]
-        self.action_buffer[i] = transition["action"]
+        self.action_exec_buffer[i] = transition["action_exec"]
+        self.action_policy_buffer[i] = transition["action_policy"]
+
         self.reward_buffer[i] = transition["reward"]
         self.next_obs_buffer[i] = transition["next_obs"]
         self.done_buffer[i] = transition["done"]
@@ -92,7 +97,7 @@ class ReplayBuffer:
         idxs = np.random.choice(self.size_tracker, batch_size, replace=False)
         return {
             "obs": self._to_tensor_batch(self.obs_buffer[idxs]),
-            "action": self._to_tensor_batch(self.action_buffer[idxs]),
+            "action": self._to_tensor_batch(self.action_exec_buffer[idxs]),
             "reward": self._to_tensor_batch(self.reward_buffer[idxs]),
             "next_obs": self._to_tensor_batch(self.next_obs_buffer[idxs]),
             "done": self._to_tensor_batch(self.done_buffer[idxs]),
@@ -108,52 +113,124 @@ class ReplayBuffer:
             "recv_mask": self._to_tensor_batch(self.recv_mask_buffer[idxs]),
             "time_lags": self._to_tensor_batch(self.time_lags_buffer[idxs]),
         }
-
+    
     def _is_valid_anchor(self, idx: int, pred_horizon: int) -> bool:
+        """
+        判断 idx 能不能作为当前时刻 t 的锚点。
+
+        合法条件：
+        1. 需要拿到 t-1，所以 idx 必须 >= 1
+        2. 需要拿到 t 到 t+K-1，所以 idx + pred_horizon - 1 不能越界
+        3. t-1 到 t+K-1 必须都在同一个 episode
+        4. 这些 step_id 必须严格连续
+        """
+        if self.size_tracker <= 0:
+            return False
+
+        # 需要 t-1
         if idx <= 0:
             return False
+
+        # 需要 [t, t+K-1]
         if idx + pred_horizon - 1 >= self.size_tracker:
             return False
+
         ep = self.episode_id_buffer[idx]
         if ep < 0:
             return False
-        # 需要 t-1 到 t+K-1 全在同一条 episode 里，并且 step 连续
-        indices = list(range(idx - 1, idx + pred_horizon))
+
+        # 检查 [t-1, t, ..., t+K-1]
+        indices = np.arange(idx - 1, idx + pred_horizon)
+
         eps = self.episode_id_buffer[indices]
         steps = self.step_id_buffer[indices]
+
+        # 必须同一条 episode
         if not np.all(eps == ep):
             return False
-        return np.all(np.diff(steps) == 1)
 
+        # step 必须连续递增 1
+        if not np.all(np.diff(steps) == 1):
+            return False
+
+        return True
+    
+    def _get_valid_anchor_indices(self, pred_horizon: int) -> List[int]:
+        """
+        返回当前 replay buffer 中所有合法的 intent sequence 锚点。
+        """
+        if self.size_tracker <= 1:
+            return []
+
+        valid = []
+        # idx 作为当前时刻 t
+        for idx in range(1, self.size_tracker):
+            if self._is_valid_anchor(idx, pred_horizon):
+                valid.append(idx)
+        return valid
+
+
+    def num_valid_intent_anchors(self, pred_horizon: int) -> int:
+        """
+        返回当前 replay buffer 中可用于 sample_intent_sequences 的合法锚点数量。
+        """
+        return len(self._get_valid_anchor_indices(pred_horizon))
+
+    
     def sample_intent_sequences(self, batch_size: int, pred_horizon: int) -> Dict[str, torch.Tensor]:
-        valid: List[int] = [i for i in range(self.size_tracker) if self._is_valid_anchor(i, pred_horizon)]
+        """
+        采样 CoDe 的发送端辅助训练序列。
+
+        以 anchor = t 为中心，返回：
+        - h_prev           : t-1 时刻的历史隐藏状态
+        - prev_action_prev : t-2 -> t-1 的上一动作（按你当前 prev_action_buffer 的定义来）
+        - h_curr           : t 时刻的历史隐藏状态
+        - prev_action_curr : t-1 -> t 的上一动作
+        - obs_decode       : [o_t, o_{t+1}, ..., o_{t+K-1}]
+        - target_action_seq: [a_t, a_{t+1}, ..., a_{t+K-1}]
+        """
+        valid = self._get_valid_anchor_indices(pred_horizon)
+
         if len(valid) < batch_size:
-            raise ValueError(f"Not enough valid intent sequences: need {batch_size}, have {len(valid)}")
+            raise ValueError(
+                f"Not enough valid intent anchors: need {batch_size}, "
+                f"but only have {len(valid)} valid anchors."
+            )
+
         anchors = np.random.choice(valid, batch_size, replace=False)
 
+        # t-1
         h_prev = self.h_out_buffer[anchors - 1]
         prev_action_prev = self.prev_action_buffer[anchors - 1]
+
+        # t
         h_curr = self.h_out_buffer[anchors]
         prev_action_curr = self.prev_action_buffer[anchors]
 
+        # [o_t, ..., o_{t+K-1}]
         obs_decode = np.stack(
-            [self.obs_buffer[a: a + pred_horizon] for a in anchors], axis=0
+            [self.obs_buffer[a : a + pred_horizon] for a in anchors],
+            axis=0
         )  # [B, K, N, O]
+
+        # [a_t, ..., a_{t+K-1}]
+        # 注意：这里应该用无噪 policy 动作做 decoder 的监督
         target_action_seq = np.stack(
-            [self.action_buffer[a: a + pred_horizon] for a in anchors], axis=0
+            [self.action_policy_buffer[a : a + pred_horizon] for a in anchors],
+            axis=0
         )  # [B, K, N, A]
 
-        # 转成 [B, N, K, *]，便于后面 flatten(B*N)
+        # 现在转成 [B, N, K, ...]
         obs_decode = np.transpose(obs_decode, (0, 2, 1, 3))
         target_action_seq = np.transpose(target_action_seq, (0, 2, 1, 3))
 
         return {
-            "h_prev": self._to_tensor_batch(h_prev),
-            "prev_action_prev": self._to_tensor_batch(prev_action_prev),
-            "h_curr": self._to_tensor_batch(h_curr),
-            "prev_action_curr": self._to_tensor_batch(prev_action_curr),
-            "obs_decode": self._to_tensor_batch(obs_decode),
-            "target_action_seq": self._to_tensor_batch(target_action_seq),
+            "h_prev": self._to_tensor_batch(h_prev),                     # [B, N, H]
+            "prev_action_prev": self._to_tensor_batch(prev_action_prev), # [B, N, A]
+            "h_curr": self._to_tensor_batch(h_curr),                     # [B, N, H]
+            "prev_action_curr": self._to_tensor_batch(prev_action_curr), # [B, N, A]
+            "obs_decode": self._to_tensor_batch(obs_decode),             # [B, N, K, O]
+            "target_action_seq": self._to_tensor_batch(target_action_seq), # [B, N, K, A]
         }
     
     # ==========================================
@@ -166,7 +243,8 @@ class ReplayBuffer:
         # ⚠️ 修复点：保存真正的变量 self.size_tracker
         state = {
             'obs': self.obs_buffer,
-            'action': self.action_buffer,
+            'action_exec': self.action_exec_buffer,
+            'action_policy': self.action_policy_buffer,
             'reward': self.reward_buffer,
             'next_obs': self.next_obs_buffer,
             'done': self.done_buffer,
@@ -191,7 +269,8 @@ class ReplayBuffer:
                 state = pickle.load(f)
                 
             self.obs_buffer = state['obs']
-            self.action_buffer = state['action']
+            self.action_exec_buffer = state['action_exec']
+            self.action_policy_buffer = state['action_policy']
             self.reward_buffer = state['reward']
             self.next_obs_buffer = state['next_obs']
             self.done_buffer = state['done']

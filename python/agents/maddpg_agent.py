@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+import numpy as np
 
 from models.magic_maddpg import MAGICCoDeActor
 from models.magic_maddpg import Centralized_Critic
@@ -56,12 +57,14 @@ class MADDPG_Agent:
         self.actor.train()
 
         action = action_tensor.squeeze(0).cpu().numpy()
+        action_policy = action_tensor.squeeze(0).cpu().numpy()
+        action_exec = action_policy.copy()
         graphs = hard_weights.squeeze(0).cpu().numpy()
         graphs_soft = soft_weights.squeeze(0).cpu().numpy()
 
         if add_noise:
-            noise = torch.randn_like(action_tensor) * noise_scale
-            action = torch.clamp(action_tensor + noise, -1.0, 1.0).squeeze(0).cpu().numpy()
+            noise = np.random.normal(0, noise_scale, size=action_exec.shape)
+            action_exec = np.clip(action_exec + noise, -1.0, 1.0)
 
         # [MOD 9-1] 把 rollout 时真正使用的 receiver-side snapshot 一并返回，方便存入 buffer
         comm_snapshot = {
@@ -73,7 +76,7 @@ class MADDPG_Agent:
             "recv_mask": aux["recv_mask"].squeeze(0).cpu().numpy(),
             "time_lags": aux["time_lags"].squeeze(0).cpu().numpy(),
         }
-        return action, graphs, graphs_soft, h_out, c_out, comm_snapshot
+        return action_policy, action_exec, graphs, graphs_soft, h_out, c_out, comm_snapshot
 
     def update(self, replay_buffer):
         batch = replay_buffer.sample_transitions(self.args.batch_size)
@@ -123,21 +126,37 @@ class MADDPG_Agent:
         actor_rl_loss = -self.critic(global_obs, curr_actions.reshape(bsz, -1)).mean()
 
         # --------------------
-        # 3) CoDe auxiliary losses
+        # 3) CoDe auxiliary losses 辅助损失
         # --------------------
-        if replay_buffer.size() >= self.args.batch_size + self.args.pred_horizon + 2:
-            seq = replay_buffer.sample_intent_sequences(self.args.batch_size, self.args.pred_horizon)
-            mu_prev, logvar_prev, intent_prev = self.actor.intent_encoder(seq["h_prev"], seq["prev_action_prev"])
-            mu_curr, logvar_curr, intent_curr = self.actor.intent_encoder(seq["h_curr"], seq["prev_action_curr"])
+        num_valid_anchors = replay_buffer.num_valid_intent_anchors(self.args.pred_horizon)
+
+        if num_valid_anchors >= self.args.batch_size:
+            seq = replay_buffer.sample_intent_sequences(
+                self.args.batch_size,
+                self.args.pred_horizon
+            )
+
+            mu_prev, logvar_prev, intent_prev = self.actor.intent_encoder(
+                seq["h_prev"],
+                seq["prev_action_prev"]
+            )
+            mu_curr, logvar_curr, intent_curr = self.actor.intent_encoder(
+                seq["h_curr"],
+                seq["prev_action_curr"]
+            )
 
             bn = self.args.batch_size * self.num_followers
+
             pred_actions = self.actor.intent_decoder(
                 intent_curr.reshape(bn, -1),
                 seq["h_curr"].reshape(bn, -1),
                 seq["obs_decode"].reshape(bn, self.args.pred_horizon, self.args.obs_size),
                 seq["prev_action_curr"].reshape(bn, self.args.action_dim),
             )
-            target_actions = seq["target_action_seq"].reshape(bn, self.args.pred_horizon, self.args.action_dim)
+
+            target_actions = seq["target_action_seq"].reshape(
+                bn, self.args.pred_horizon, self.args.action_dim
+            )
 
             intent_loss_dict = total_intent_loss(
                 self.args,
@@ -150,7 +169,12 @@ class MADDPG_Agent:
             )
         else:
             zero = actor_rl_loss.new_zeros(())
-            intent_loss_dict = {"L_inf": zero, "L_c": zero, "L_k": zero, "L_int": zero}
+            intent_loss_dict = {
+                "L_inf": zero,
+                "L_c": zero,
+                "L_k": zero,
+                "L_int": zero,
+            }
 
         total_losses = total_training_loss(actor_rl_loss, intent_loss_dict, aux["L_e"])
 

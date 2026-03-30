@@ -3,7 +3,7 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from .comm_utils import build_mlp
+from utils.comm_utils import build_mlp
 
 
 class IntentDecoder(nn.Module):

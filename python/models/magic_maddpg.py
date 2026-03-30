@@ -2,11 +2,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 import numpy as np
+from typing import Dict, Optional, Tuple, List, Any
 from models.gnn_layers import GraphAttention
 from models.intent_encoder import IntentEncoder
 from models.intent_decoder import IntentDecoder
 from models.fusion_net import DualAlignmentFusion
 from models.runtime_delay_buffer import RuntimeDelayBuffer
+from utils.comm_utils import ensure_action_tensor
 
 class MAGICCoDeActor(nn.Module):
     """重构 Actor。
@@ -39,6 +41,7 @@ class MAGICCoDeActor(nn.Module):
         self.prev_action = None
 
         # initialize the gat encoder for the Scheduler
+        self.gat_encoder = None
         if args.use_gat_encoder:
             self.gat_encoder = GraphAttention(args.hid_size, args.gat_encoder_out_size, dropout=dropout, negative_slope=negative_slope, num_heads=args.ge_num_heads, self_loop_type=1, average=True, normalize=args.gat_encoder_normalize)
 

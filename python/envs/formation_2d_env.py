@@ -82,13 +82,13 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             grid = np.zeros((200, 200), dtype=bool) 
             grid[0:5, :] = True; grid[-5:, :] = True
             grid[:, 0:5] = True; grid[:, -5:] = True
-            grid[30:50, 0:200] = True
-            grid[75:100, 50:200] =  True
+            grid[30:50, 0:120] = True
+            grid[80:100, 50:200] =  True
             grid[130:140, 0:120] = True
       
             grid[165:175, 100:200] = True
 
-            grid[160:170, 90:110] = True
+            grid[150:170, 90:110] = False
             return grid
 
     def _world_to_grid(self, x, y):
@@ -115,7 +115,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             # goal_idx = self._get_random_free_point()
             
             start_pos = [-7.5,-8.3]
-            goal_pos = [7.5, -8.3]
+            goal_pos = [-7.5, 7.5]
             start_idx = self._world_to_grid(*start_pos)
             goal_idx = self._world_to_grid(*goal_pos)
 

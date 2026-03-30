@@ -203,7 +203,7 @@ class MADDPGFormationReward:
             team_reward -= 100.0 
             reward_details['danger'] -= 100.0
         else:
-            team_reward += 0.2 # 存活奖励
+            team_reward += 2 # 存活奖励
         
         # print(f"Reward Details: {reward_details}")
 
