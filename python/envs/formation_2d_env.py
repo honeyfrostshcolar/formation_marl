@@ -32,9 +32,24 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         self.map_resolution = 0.1
         self.map_origin = np.array([0.0, 0.0])
-        self.map_grid = self._load_or_generate_map()
-        self.planning_safe_margin = 1.0 # 膨胀层的安全边距 (米)，根据实际情况调整
-        self.inflated_map_grid = self._inflate_map(self.map_grid, self.planning_safe_margin)
+
+        self.available_map_modes = ["open", "z_map", "star_map", "custom"]
+
+        self.custom_map_path = config.get(
+            "custom_map_path",
+            "/home/nankai/formation_test/maps/underground_garage.pgm"
+        )
+
+        # 1. 极其干净的“地图注册表 (Map Registry)”
+        # 以后想加什么地图，直接在这里加一行，指向你的生成函数！
+        self.map_registry = {
+            "open": self._generate_open_map,
+            "z_map": self._generate_z_map,
+            "star_map": self._generate_star_map,
+            "custom": lambda: self._load_custom_map(self.custom_map_path), 
+        }
+
+        self.map_mode = config.get("map_mode", "open")
 
         self.sensing_radius = config.get("sensing_radius", 5.0)  # 最大感知半径 (米)
         self.max_visible_teammates = 3  # 网络最多只管最近的 3 个兄弟
@@ -55,10 +70,10 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             dtype=np.float32
         )
         
-        # 维度 = 自己的雷达(21) + 老大的位置(2) + 最多3个兄弟的信息(3 * 3)
+        # 维度 = 自己的雷达(21) + 老大的位置(2) + 最多3个兄弟的信息(3 * 3) + 2(leader_pos, leader_vel) + 1(formation_alpha)
         # 兄弟信息为什么是 3 维？因为除了相对位移 (dx, dy)，我们还需要一个标志位 (is_valid)
         # 来告诉网络“这个槽位是不是真实存在的兄弟”（防止填 0 时被网络误认为是坐标原点的兄弟）
-        obs_dim = 21 + 2 + (self.max_visible_teammates * 3) + 2
+        obs_dim = 21 + 2 + (self.max_visible_teammates * 3) + 2 + 1
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -70,26 +85,72 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         self.step_count = 0
 
-    def _load_or_generate_map(self):
-        map_path = "/home/nankai/formation_test/maps/underground_garage5.pgm"
+        self._rebuild_map()
+
+    def set_map_mode(self, map_mode: str, custom_map_path: str = None):
+        if map_mode not in self.available_map_modes:
+            raise ValueError(f"Unknown map_mode={map_mode}, allowed={self.available_map_modes}")
+        self.map_mode = map_mode
+        if custom_map_path is not None:
+            self.custom_map_path = custom_map_path
+        self._rebuild_map()
+
+
+    def _rebuild_map(self):
+        # ✅ 2. 没有任何 if-else，直接从字典里调函数生成地图
+        self.map_grid = self.map_registry[self.map_mode]()
+        self.planning_safe_margin = 1.0
+        self.inflated_map_grid = self._inflate_map(self.map_grid, self.planning_safe_margin)
+
+
+    def _load_custom_map(self, map_path: str):
         if os.path.exists(map_path):
-            print(f"✅ 加载地图成功: {map_path}")
-            img = Image.open(map_path).convert('L') 
-            grid = np.array(img) < 250 
+            print(f"✅ 加载自定义地图成功: {map_path}")
+            img = Image.open(map_path).convert("L")
+            grid = np.array(img) < 250
             return grid
         else:
-            print("❌ 地图文件不存在，生成默认地图")
-            grid = np.zeros((200, 200), dtype=bool) 
-            grid[0:5, :] = True; grid[-5:, :] = True
-            grid[:, 0:5] = True; grid[:, -5:] = True
-            grid[30:50, 0:120] = True
-            grid[80:100, 50:200] =  True
-            grid[130:140, 0:120] = True
-      
-            grid[165:175, 100:200] = True
+            print(f"❌ 自定义地图不存在: {map_path}，回退到默认 open 地图")
+            return self._generate_open_map()
 
-            grid[150:170, 90:110] = False
-            return grid
+
+    def _generate_open_map(self):
+        grid = np.zeros((200, 200), dtype=bool)
+        grid[0:5, :] = True
+        grid[-5:, :] = True
+        grid[:, 0:5] = True
+        grid[:, -5:] = True
+        return grid
+
+
+    def _generate_z_map(self):
+        grid = np.zeros((200, 200), dtype=bool)
+        grid[0:5, :] = True
+        grid[-5:, :] = True
+        grid[:, 0:5] = True
+        grid[:, -5:] = True
+
+        grid[30:40, 0:120] = True
+        grid[80:95, 80:200] =  True
+        grid[120:130, 0:120] = True
+        grid[160:170, 100:200] = True
+        return grid
+    
+    def _generate_star_map(self):
+        grid = np.zeros((200, 200), dtype=bool)
+        grid[0:5, :] = True
+        grid[-5:, :] = True
+        grid[:, 0:5] = True
+        grid[:, -5:] = True
+
+        num_per_side = 4  # 每行/每列的点数
+        x_coords = np.linspace(35, 165, num_per_side, dtype=int)
+        y_coords = np.linspace(35, 165, num_per_side, dtype=int)
+        for x in x_coords:
+            for y in y_coords:
+                grid[y-4:y+5, x-4:x+5] = True
+        return grid
+    
 
     def _world_to_grid(self, x, y):
         height, width = self.map_grid.shape
@@ -109,15 +170,15 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             np.random.seed(seed)
             
         while True:
-            # start_idx = self._get_random_free_point_with_clearance(2.5)
-            # # world_start = self._grid_to_world(*start_idx)
-            # # print("World start:", world_start)
-            # goal_idx = self._get_random_free_point()
+            start_idx = self._get_random_free_point_with_clearance(2.5)
+            # world_start = self._grid_to_world(*start_idx)
+            # print("World start:", world_start)
+            goal_idx = self._get_random_free_point()
             
-            start_pos = [-7.5,-8.3]
-            goal_pos = [-7.5, 7.5]
-            start_idx = self._world_to_grid(*start_pos)
-            goal_idx = self._world_to_grid(*goal_pos)
+            # start_pos = [-7.5,-8.3]
+            # goal_pos = [-7.5, 7.5]
+            # start_idx = self._world_to_grid(*start_pos)
+            # goal_idx = self._world_to_grid(*goal_pos)
 
 
             path_indices = self._plan_path(start_idx, goal_idx)
@@ -390,7 +451,10 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         rank_norm = rank / max_rank
         role_code = np.array([side, rank_norm], dtype=np.float32)
 
-        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code])
+        formation_alpha = self.reward_fn.compute_formation_alpha(features.corridor_width)
+        formation_alpha_obs = np.array([formation_alpha], dtype=np.float32)
+
+        obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code, formation_alpha_obs])
         return obs
 
     def _simulate_radar(self, origin_pos):

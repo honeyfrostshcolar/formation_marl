@@ -29,6 +29,19 @@ class MADDPGFormationReward:
         self.w_direction = 8.0   # 方向感：保持在老大后方的得分权重
         self.w_geometry = 2.0    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
 
+    def compute_formation_alpha(self, corridor_width: float) -> float:
+        """
+        根据走廊宽度计算当前期望队形的混合系数：
+        alpha = 0 -> line
+        alpha = 1 -> V
+        """
+        alpha = np.clip(
+            (corridor_width - self.narrow_width) / (self.wide_width - self.narrow_width),
+            0.0,
+            1.0,
+        )
+        return float(alpha)
+
     
     def compute(self, leader_pos, follower_positions, prev_follower_positions, leader_yaw, in_danger_zone, in_crash_zone, dynamic_connections, corridor_width):
         num_followers = len(follower_positions)
@@ -43,7 +56,8 @@ class MADDPGFormationReward:
             'separation': 0.0,
             'direction': 0.0,
             'danger': 0.0,
-            'geometry': 0.0
+            'geometry': 0.0,
+            "formation_alpha": 0.0,
         }
 
         # ==========================================
@@ -138,10 +152,8 @@ class MADDPGFormationReward:
         # 计算软切换系数 alpha (0 代表纯1字，1 代表纯V字)
         # narrow_width = 3.0   wide_width = 5.0
         # print(f"corridor_width: {corridor_width}")
-        alpha = np.clip(
-            (corridor_width - self.narrow_width) / (self.wide_width - self.narrow_width), 
-            0.0, 1.0
-        )
+        alpha = self.compute_formation_alpha(corridor_width)
+        reward_details["formation_alpha"] = alpha
         # print("alpha", alpha)
         line_spacing = 0.9
         

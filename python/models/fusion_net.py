@@ -71,7 +71,8 @@ class DualAlignmentFusion(nn.Module):
         receiver_intents: torch.Tensor,
         sender_intents: torch.Tensor,
         sender_hidden: torch.Tensor,
-        recv_mask: torch.Tensor,
+        available_mask: torch.Tensor,     # [B, N, N] 0/1, 消息是否已到达 (hard mask)
+        route_gate: torch.Tensor,         # [B, N, N] 可微门控，来自当前 scheduler (soft mask)
         time_lags: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         b, n, _, _ = sender_intents.shape
@@ -82,38 +83,54 @@ class DualAlignmentFusion(nn.Module):
             time_lags = torch.zeros(b, n, n, device=device, dtype=dtype)
 
         
-        # ===== 1) Intent Alignment =====
+        # ===== 1) QKV =====
         query = self.WQ(receiver_intents)                    # [B, N, D]
         key = self.WK(sender_intents)                        # [B, N, N, D]
         value = self.WV(torch.cat([sender_intents, sender_hidden], dim=-1))  # [B, N, N, V]
 
         logits = (query.unsqueeze(2) * key).sum(dim=-1) / math.sqrt(query.shape[-1])
 
-        # 不让 agent 看自己
-        eye = torch.eye(n, device=device, dtype=torch.bool).unsqueeze(0)
-        valid_mask = recv_mask.bool() & (~eye)
+        # ===== 2) 只用硬可用性做 softmax 归一化 =====
+        eye = torch.eye(n, device=device, dtype=torch.bool).unsqueeze(0)  # [1, N, N]
+        hard_available = (available_mask > 0.5) & (~eye)   # bool mask
 
-        alpha = self._masked_softmax(logits, valid_mask, dim=-1)
+        alpha = self._masked_softmax(logits, hard_available, dim=-1)
 
-        # ===== 2) Entropy Regularization: L_e =====
-        # 论文写法：Le = -lambda_e * sum(alpha_ij log alpha_ij)
-        alpha_safe = alpha.clamp_min(self.eps)
-        entropy_term = (alpha_safe * alpha_safe.log()) * valid_mask.float()
+        # ===== 3) 时间衰减 =====
+        decay = torch.pow(
+            torch.tensor(self.gamma_t, device=device, dtype=dtype),
+            time_lags.clamp_min(0.0),
+        )
+
+        # ===== 4) 当前 scheduler 的软门控 =====
+        # route_gate 是浮点张量，必须保留梯度
+        route_gate = route_gate * (~eye).float()
+
+        # 最终门控：
+        # - alpha: 内容相关性
+        # - decay: 时效性
+        # - route_gate: 当前 scheduler 想不想连这条边
+        # - available_mask: 这条消息是否真的到达过
+        gated_alpha = alpha * decay * route_gate * available_mask.float()
+
+        if self.renorm_after_decay:
+            denom = gated_alpha.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            gated_alpha = gated_alpha / denom
+
+        # ===== 5) 熵正则 =====
+        # 注意：这里用 gated_alpha，而不是 alpha
+        # 这样 L_e 才能对 scheduler 产生梯度
+        gated_safe = gated_alpha.clamp_min(self.eps)
+        entropy_term = gated_safe * gated_safe.log()
         L_e = -self.lambda_e * entropy_term.sum(dim=(-1, -2)).mean()
 
-        # ===== 3) Timeliness Alignment =====
-        decay = torch.pow(torch.tensor(self.gamma_t, device=device, dtype=dtype), time_lags.clamp_min(0.0))
-        alpha_hat = alpha * decay * valid_mask.float()
-        if self.renorm_after_decay:
-            denom = alpha_hat.sum(dim=-1, keepdim=True).clamp_min(self.eps)
-            alpha_hat = alpha_hat / denom
+        # ===== 6) 聚合 =====
+        combined = (gated_alpha.unsqueeze(-1) * value).sum(dim=2)
 
-        # ===== 4) Weighted Message Fusion =====
-        combined = (alpha_hat.unsqueeze(-1) * value).sum(dim=2)
         return {
             "combined": combined,
             "alpha": alpha,
-            "alpha_hat": alpha_hat,
+            "alpha_hat": gated_alpha,
             "L_e": L_e,
         }
 

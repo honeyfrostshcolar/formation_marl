@@ -42,8 +42,6 @@ class ReplayBuffer:
         self.route_hard_buffer = np.zeros((c, n, n), dtype=np.float32)
         self.route_soft_buffer = np.zeros((c, n, n), dtype=np.float32)
 
-        self.sender_intents_recv_buffer = np.zeros((c, n, n, intent_dim), dtype=np.float32)
-        self.sender_hidden_recv_buffer = np.zeros((c, n, n, hid_size), dtype=np.float32)
         self.recv_mask_buffer = np.zeros((c, n, n), dtype=np.float32)
         self.time_lags_buffer = np.zeros((c, n, n), dtype=np.float32)
 
@@ -53,18 +51,12 @@ class ReplayBuffer:
         self.ptr = 0
         self.size_tracker = 0
 
-    def store(self, transition : dict):
-        """
-        存入一步经验 (transition)
-        obs, action, next_obs 是 numpy 数组，形状应为 (num_followers, dim)
-        reward, done 是单个浮点数 (团队总奖励，团队是否全剧终)
-        """
+    def store(self, transition: dict):
         i = self.ptr
 
         self.obs_buffer[i] = transition["obs"]
         self.action_exec_buffer[i] = transition["action_exec"]
         self.action_policy_buffer[i] = transition["action_policy"]
-
         self.reward_buffer[i] = transition["reward"]
         self.next_obs_buffer[i] = transition["next_obs"]
         self.done_buffer[i] = transition["done"]
@@ -74,44 +66,54 @@ class ReplayBuffer:
         self.h_out_buffer[i] = transition["h_out"]
         self.c_out_buffer[i] = transition["c_out"]
 
-        self.prev_action_buffer[i] = transition["prev_action"]  # 上一时刻动作向量
-        self.route_hard_buffer[i] = transition["route_hard"]  # 硬路由矩阵
-        self.route_soft_buffer[i] = transition["route_soft"]  # 软路由矩阵
+        self.prev_action_buffer[i] = transition["prev_action"]
+        self.route_hard_buffer[i] = transition["route_hard"]
+        self.route_soft_buffer[i] = transition["route_soft"]
+        
+        self.recv_mask_buffer[i] = transition["recv_mask"]
+        self.time_lags_buffer[i] = transition["time_lags"]
 
-        self.sender_intents_recv_buffer[i] = transition["sender_intents_recv"]  # 接收者视角下，每个发送者的意图
-        self.sender_hidden_recv_buffer[i] = transition["sender_hidden_recv"]  # 接收者看到的发送者隐藏状态
-        self.recv_mask_buffer[i] = transition["recv_mask"]  # 接收者视角下，每个接收者实际收到了哪些发送者的消息
-        self.time_lags_buffer[i] = transition["time_lags"]  # 每个消息的延迟（当前步减去消息发送步），0表示刚收到，正数表示消息是几秒前发送的。
+        self.episode_id_buffer[i] = transition["episode_id"]
+        self.step_id_buffer[i] = transition["step_id"]
 
-        self.episode_id_buffer[i] = transition["episode_id"]  # episode id
-        self.step_id_buffer[i] = transition["step_id"]  # step id
-
-        # 环形缓冲区逻辑：满了就从头开始覆盖最老的数据
         self.ptr = (self.ptr + 1) % self.capacity
         self.size_tracker = min(self.size_tracker + 1, self.capacity)
 
-    def _to_tensor_batch(self, data: np.ndarray) -> torch.Tensor:
-        return torch.as_tensor(data, dtype=torch.float32, device=self.device)
+    def _to_tensor_batch(self, x):
+        return torch.as_tensor(x, dtype=torch.float32, device=self.device)
 
-    def sample_transitions(self, batch_size: int) -> Dict[str, torch.Tensor]:
+    def sample_transitions(self, batch_size: int):
+
+        if self.size_tracker < batch_size:
+            raise ValueError(
+                f"Not enough samples in replay buffer: have {self.size_tracker}, need {batch_size}"
+            )
+        
         idxs = np.random.choice(self.size_tracker, batch_size, replace=False)
+
         return {
             "obs": self._to_tensor_batch(self.obs_buffer[idxs]),
-            "action": self._to_tensor_batch(self.action_exec_buffer[idxs]),
+            "action": self._to_tensor_batch(self.action_exec_buffer[idxs]),   # critic 用执行动作
+            "action_policy": self._to_tensor_batch(self.action_policy_buffer[idxs]),
             "reward": self._to_tensor_batch(self.reward_buffer[idxs]),
             "next_obs": self._to_tensor_batch(self.next_obs_buffer[idxs]),
             "done": self._to_tensor_batch(self.done_buffer[idxs]),
+
             "h_in": self._to_tensor_batch(self.h_in_buffer[idxs]),
             "c_in": self._to_tensor_batch(self.c_in_buffer[idxs]),
             "h_out": self._to_tensor_batch(self.h_out_buffer[idxs]),
             "c_out": self._to_tensor_batch(self.c_out_buffer[idxs]),
+
             "prev_action": self._to_tensor_batch(self.prev_action_buffer[idxs]),
+
             "route_hard": self._to_tensor_batch(self.route_hard_buffer[idxs]),
             "route_soft": self._to_tensor_batch(self.route_soft_buffer[idxs]),
-            "sender_intents_recv": self._to_tensor_batch(self.sender_intents_recv_buffer[idxs]),
-            "sender_hidden_recv": self._to_tensor_batch(self.sender_hidden_recv_buffer[idxs]),
+
             "recv_mask": self._to_tensor_batch(self.recv_mask_buffer[idxs]),
             "time_lags": self._to_tensor_batch(self.time_lags_buffer[idxs]),
+
+            "episode_id": torch.as_tensor(self.episode_id_buffer[idxs], dtype=torch.long, device=self.device),
+            "step_id": torch.as_tensor(self.step_id_buffer[idxs], dtype=torch.long, device=self.device),
         }
     
     def _is_valid_anchor(self, idx: int, pred_horizon: int) -> bool:
@@ -242,18 +244,25 @@ class ReplayBuffer:
         
         # ⚠️ 修复点：保存真正的变量 self.size_tracker
         state = {
-            'obs': self.obs_buffer,
-            'action_exec': self.action_exec_buffer,
-            'action_policy': self.action_policy_buffer,
-            'reward': self.reward_buffer,
-            'next_obs': self.next_obs_buffer,
-            'done': self.done_buffer,
-            'ptr': self.ptr, 
-            'h_in': self.h_in_buffer,
-            'c_in': self.c_in_buffer,
-            'h_out': self.h_out_buffer,
-            'c_out': self.c_out_buffer,  
-            'size_tracker': getattr(self, 'size_tracker', 0) # 确保读取正确的整数变量
+            "obs": self.obs_buffer,
+            "action_exec": self.action_exec_buffer,
+            "action_policy": self.action_policy_buffer,
+            "reward": self.reward_buffer,
+            "next_obs": self.next_obs_buffer,
+            "done": self.done_buffer,
+            "h_in": self.h_in_buffer,
+            "c_in": self.c_in_buffer,
+            "h_out": self.h_out_buffer,
+            "c_out": self.c_out_buffer,
+            "prev_action": self.prev_action_buffer,
+            "route_hard": self.route_hard_buffer,
+            "route_soft": self.route_soft_buffer,
+            "recv_mask": self.recv_mask_buffer,
+            "time_lags": self.time_lags_buffer,
+            "episode_id": self.episode_id_buffer,
+            "step_id": self.step_id_buffer,
+            "ptr": self.ptr,
+            "size_tracker": self.size_tracker,
         }
         
         with open(buffer_path, 'wb') as f:
@@ -279,6 +288,14 @@ class ReplayBuffer:
             self.c_in_buffer = state['c_in']
             self.h_out_buffer = state['h_out']
             self.c_out_buffer = state['c_out']
+            self.prev_action_buffer = state["prev_action"]
+            self.route_hard_buffer = state["route_hard"]
+            self.route_soft_buffer = state["route_soft"]
+            self.recv_mask_buffer = state["recv_mask"]
+            self.time_lags_buffer = state["time_lags"]
+            self.episode_id_buffer = state["episode_id"]
+            self.step_id_buffer = state["step_id"]
+
             
             # 🚨 救命补丁：如果是读那个带有 Bug 的旧文件，直接手动把 size 设满！
             if 'size_tracker' in state:

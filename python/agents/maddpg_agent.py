@@ -71,8 +71,6 @@ class MADDPG_Agent:
             "prev_action": aux["prev_action_used"].squeeze(0).cpu().numpy(),
             "route_hard": aux["route_hard"].squeeze(0).cpu().numpy(),
             "route_soft": aux["route_soft"].squeeze(0).cpu().numpy(),
-            "sender_intents_recv": aux["sender_intents_recv"].squeeze(0).cpu().numpy(),
-            "sender_hidden_recv": aux["sender_hidden_recv"].squeeze(0).cpu().numpy(),
             "recv_mask": aux["recv_mask"].squeeze(0).cpu().numpy(),
             "time_lags": aux["time_lags"].squeeze(0).cpu().numpy(),
         }
@@ -111,8 +109,6 @@ class MADDPG_Agent:
         # 2) Actor RL + receiver-side comm snapshot
         # --------------------
         external_comm = {
-            "sender_intents": batch["sender_intents_recv"],
-            "sender_hidden": batch["sender_hidden_recv"],
             "recv_mask": batch["recv_mask"],
             "time_lags": batch["time_lags"],
         }

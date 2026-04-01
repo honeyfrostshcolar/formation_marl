@@ -17,6 +17,15 @@ def parse_args():
     )
 
     # =========================================================
+    # [新增] 评估专属参数
+    # =========================================================
+    parser.add_argument("--model_dir", type=str, required=True, help="要评估的模型文件夹路径 (包含 maddpg_checkpoint.pt 的目录)。")
+    parser.add_argument("--eval_episodes", type=int, default=10, help="评估多少局。")
+    parser.add_argument("--map_mode", type=str, default="custom", choices=["open", "z_map", "custom"], help="你想在哪个地图上评估模型？")
+    parser.add_argument("--custom_map_path", type=str, default="/home/lpp/formation_test/maps/underground_garage5.pgm", help="真实地图路径。")
+
+
+    # =========================================================
     # 一、环境参数
     # =========================================================
     parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量，包含 1 个 leader 和 N-1 个 follower。")
@@ -98,7 +107,7 @@ def parse_args():
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
     args.action_dim = 2
-    args.obs_size = 34
+    args.obs_size = 35 # ✅ 必须改为 35，适配最新加入的 formation_alpha 指令！
 
     return args
 
@@ -130,28 +139,26 @@ def load_evaluate_model(agent, path):
 # 2. 主评估流程
 # ==========================================
 def main():
+    args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"评估启动，运行设备: {device}")
+    print(f"即将测试的地图模式: {args.map_mode}")
 
-    # 这里改成你自己的 checkpoint 路径
-    model_path = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint"
-
-    args = parse_args()
-
+    # ✅ 把地图模式塞进 config 给环境初始化用
     config = {
         "num_robots": args.num_robots,
         "max_steps": args.max_steps,
         "render": True,
         "sensing_radius": args.sensing_radius,
+        "map_mode": args.map_mode,
+        "custom_map_path": args.custom_map_path,
     }
 
     env = Formation2DMultiAgentEnv(config)
     agent = MADDPG_Agent(args)
-    load_evaluate_model(agent, model_path)
+    load_evaluate_model(agent, args.model_dir)
 
-    eval_episodes = 10
-
-    for episode in range(eval_episodes):
+    for episode in range(args.eval_episodes):
         obs_dict, _ = env.reset()
         obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
 
@@ -167,7 +174,7 @@ def main():
                 obs_array,
                 h_in,
                 c_in,
-                add_noise=False,
+                add_noise=False, # 评估时严格无噪
             )
 
             # 评估时执行无噪动作；这里 action_exec == action_policy，因为 add_noise=False
@@ -197,7 +204,7 @@ def main():
             if team_done:
                 break
 
-        print(f"评估 {episode + 1}/{eval_episodes} | 步数: {step + 1:3d} | 总得分: {episode_reward:8.2f}")
+        print(f"评估 {episode + 1}/{args.eval_episodes} | 步数: {step + 1:3d} | 总得分: {episode_reward:8.2f}")
 
     print("\n评估结束。")
 

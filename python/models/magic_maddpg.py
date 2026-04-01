@@ -256,6 +256,24 @@ class MAGICCoDeActor(nn.Module):
         )
         return pred_seq.reshape(b, n, k, self.action_dim)
     
+    def _build_receiver_major_sender_tensors(
+        self,
+        intents: torch.Tensor,         # [B, N, E]
+        sender_hidden: torch.Tensor,   # [B, N, H]
+    ):
+        """
+        把当前 sender 侧张量扩成 receiver-major 形式:
+        - sender_intents_rm: [B, N, N, E]
+        - sender_hidden_rm : [B, N, N, H]
+        """
+        b, n, e = intents.shape
+        _, _, h = sender_hidden.shape
+
+        sender_intents_rm = intents.unsqueeze(1).expand(b, n, n, e).clone()
+        sender_hidden_rm = sender_hidden.unsqueeze(1).expand(b, n, n, h).clone()
+
+        return sender_intents_rm, sender_hidden_rm
+    
 
     def forward(
         self,
@@ -316,36 +334,88 @@ class MAGICCoDeActor(nn.Module):
 
         route_hard, route_soft = self.build_route_graph(h_out, agent_mask)
 
-        # 接收端输入来源明确化
+        # ==========================================
+        # 接收端输入：执行硬、训练软
+        # ==========================================
         if runtime_mode:
+            # -----------------------------
+            # 运行时：用硬图真的发消息
+            # -----------------------------
             if b != 1:
                 raise ValueError("runtime_mode=True 目前只支持 batch_size=1")
+
             delay_mat = self.runtime_buffer.push_current_packets(
                 sender_intents=intents[0],
                 sender_hidden=sender_hidden[0],
-                route_mask=route_hard[0],
-            ) # 维护发送者最新消息缓存
+                route_mask=route_hard[0],   # 运行时只用硬图
+            )
+
             recv_inputs = self.runtime_buffer.collect_receiver_inputs(
                 receiver_intents=intents,
                 hidden_dim=self.hid_size,
-            ) # 更新接收者缓存（sender_intents, sender_hidden, recv_mask, time_lags）
-            online_delay = delay_mat.unsqueeze(0)
-        elif external_comm is not None:
-            # 训练阶段，我们不模拟随机延迟（那样会导致训练不稳定），直接使用之前收集数据时记录下来的真实通信数据。
-            recv_inputs = external_comm
-            online_delay = external_comm["time_lags"].transpose(1, 2).contiguous() if "time_lags" in external_comm else torch.zeros_like(route_hard)
-        else:
-            # 既不在线交互，也没有外部数据（比如刚启动训练，或简化实验），我们假设所有消息都是同步且无延迟的。
-            recv_inputs = self._build_synchronous_receiver_inputs(intents, sender_hidden, route_hard)
-            online_delay = recv_inputs["time_lags"].transpose(1, 2).contiguous()
+            )
 
-        # 接收方融合
+            # 运行时 fusion 也按硬可用图走
+            fusion_sender_intents = recv_inputs["sender_intents"]
+            fusion_sender_hidden = recv_inputs["sender_hidden"]
+            available_mask = recv_inputs["recv_mask"]       # 消息是否已到达
+            route_gate = recv_inputs["recv_mask"]           # 运行时就按硬图执行
+            time_lags = recv_inputs["time_lags"]
+            online_delay = delay_mat.unsqueeze(0)
+
+        elif external_comm is not None:
+            # -----------------------------
+            # 训练时：当前 actor 重新算 sender 内容 + 当前 scheduler 的软门控
+            # replay 只提供“消息是否到达”和“延迟是多少”
+            # -----------------------------
+            fusion_sender_intents, fusion_sender_hidden = self._build_receiver_major_sender_tensors(
+                intents, sender_hidden
+            )
+
+            available_mask = external_comm["recv_mask"]   # 这是硬可用性，不参与学习
+            time_lags = external_comm["time_lags"]
+
+            # 训练时让 scheduler 收到梯度：
+            # 方案 1：纯软门控
+            # route_gate = route_soft.transpose(1, 2).contiguous()
+
+            # 方案 2：STE 门控（推荐）
+            route_gate_soft = route_soft.transpose(1, 2).contiguous()
+            route_gate_hard = route_hard.transpose(1, 2).contiguous()
+            route_gate = route_gate_hard.detach() - route_gate_soft.detach() + route_gate_soft
+
+            online_delay = time_lags.transpose(1, 2).contiguous()
+
+        else:
+            # -----------------------------
+            # 无延迟同步简化模式
+            # 当前 sender 内容仍然用当前 actor 计算
+            # route gate 用当前 scheduler 的软门控
+            # -----------------------------
+            fusion_sender_intents, fusion_sender_hidden = self._build_receiver_major_sender_tensors(
+                intents, sender_hidden
+            )
+
+            eye_mask = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
+            available_mask = (1.0 - eye_mask).expand(b, n, n).clone()
+            time_lags = torch.zeros(b, n, n, device=device, dtype=dtype)
+
+            route_gate_soft = route_soft.transpose(1, 2).contiguous()
+            route_gate_hard = route_hard.transpose(1, 2).contiguous()
+            route_gate = route_gate_hard.detach() - route_gate_soft.detach() + route_gate_soft
+
+            online_delay = time_lags.transpose(1, 2).contiguous()
+
+        # ==========================================
+        # 接收端融合
+        # ==========================================
         fusion_out = self.message_fusion(
             receiver_intents=intents,
-            sender_intents=recv_inputs["sender_intents"],
-            sender_hidden=recv_inputs["sender_hidden"],
-            recv_mask=recv_inputs["recv_mask"],
-            time_lags=recv_inputs["time_lags"],
+            sender_intents=fusion_sender_intents,
+            sender_hidden=fusion_sender_hidden,
+            available_mask=available_mask,
+            route_gate=route_gate,
+            time_lags=time_lags,
         )
 
         fused_msg = fusion_out["combined"]
@@ -362,20 +432,19 @@ class MAGICCoDeActor(nn.Module):
             "mu": mu,
             "logvar": logvar,
             "intents": intents,
-            "history_h": h_out, # 历史隐藏状态
+            "history_h": h_out,
             "sender_hidden": sender_hidden,
             "route_hard": route_hard,
             "route_soft": route_soft,
-            "recv_mask": recv_inputs["recv_mask"],
-            "time_lags": recv_inputs["time_lags"],
-            "sender_intents_recv": recv_inputs["sender_intents"],
-            "sender_hidden_recv": recv_inputs["sender_hidden"],
+            "recv_mask": available_mask,
+            "time_lags": time_lags,
             "L_e": fusion_out["L_e"],
             "alpha": fusion_out["alpha"],
             "alpha_hat": fusion_out["alpha_hat"],
             "online_delay": online_delay,
             "prev_action_used": prev_action,
         }
+
         return actions_out, route_hard, route_soft, (h_out, c_out), aux
 
     

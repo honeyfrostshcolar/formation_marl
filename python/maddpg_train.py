@@ -43,6 +43,95 @@ def load_checkpoint(agent, path):
         return checkpoint['episode']
     return 0
 
+CURRICULUM_SCHEDULE = [
+    (0,    {"open": 1.0}),                                   
+    (500, {"open": 0.4, "star_map": 0.6}),                     
+    (2000, {"open": 0.2, "star_map": 0.3, "z_map": 0.5}),                     
+    (5000, {"open": 0.1, "star_map": 0.2, "z_map": 0.2, "custom": 0.5}) 
+]
+
+MAP_SEED_BASE = {
+    "open": 1000,
+    "z_map": 2000,
+    "star_map": 3000,
+    "custom": 4000,
+}
+
+def choose_map_mode(episode: int) -> str:
+    """
+    根据当前的 episode，在课程表中寻找对应的概率分布并采样地图
+    """
+    current_probs = CURRICULUM_SCHEDULE[0][1]
+    
+    # 找到最后一个生效的阶段
+    for start_ep, probs in CURRICULUM_SCHEDULE:
+        if episode >= start_ep:
+            current_probs = probs
+            
+    maps = list(current_probs.keys())
+    probs = list(current_probs.values())
+    
+    return np.random.choice(maps, p=probs)
+
+
+@torch.no_grad()
+def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: int) -> float:
+    """
+    在指定地图上跑若干局，返回平均 episode reward。
+    """
+    rewards = []
+
+    rng_state = np.random.get_state()
+
+    for i in range(eval_episodes):
+        env.set_map_mode(map_mode)
+
+        eval_seed = MAP_SEED_BASE[map_mode] + i
+        obs_dict, _ = env.reset(seed=eval_seed)
+        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
+        h_in, c_in = agent.init_hidden()
+        agent.reset_runtime()
+
+        episode_reward = 0.0
+
+        for step in range(max_steps):
+            action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
+                obs_array,
+                h_in,
+                c_in,
+                add_noise=False,
+            )
+
+            action_dict = {env._agent_ids[i]: action_exec[i] for i in range(agent.num_followers)}
+            graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(agent.num_followers)}
+            graph_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(agent.num_followers)}
+
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
+                action_dict,
+                graph_dict,
+                graph_soft_dict,
+            )
+
+            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
+            team_reward = reward_dict[env._agent_ids[0]]
+            team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
+
+            episode_reward += team_reward
+            obs_array = next_obs_array
+            h_in, c_in = h_out, c_out
+
+            if team_done:
+                break
+
+        step_avg_reward = episode_reward / (step + 1)
+        rewards.append(step_avg_reward)
+
+    np.random.set_state(rng_state)
+
+    return float(np.mean(rewards))
+
 def parse_args():
     parser = argparse.ArgumentParser(description="MADDPG + MAGIC Scheduler + CoDe Delay-aware Fusion for multi-robot formation control")
 
@@ -55,7 +144,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的 batch 大小。")
     parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池最多可存储的 transition 数量。")
     parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
-    parser.add_argument("--render", action="store_true", default=False, help="是否开启环境渲染。训练时通常关闭以提升速度。")
+    parser.add_argument("--render", action="store_true", default=True, help="是否开启环境渲染。训练时通常关闭以提升速度。")
 
     # =========================================================
     # 二、MADDPG 强化学习参数
@@ -133,6 +222,9 @@ def parse_args():
     parser.add_argument("--min_delay", type=int, default=1, help="当 delay_mode=uniform 时，最小延迟步数。")
     parser.add_argument("--max_delay", type=int, default=3, help="当 delay_mode=uniform 时，最大延迟步数。")
 
+    parser.add_argument("--eval_every", type=int, default=50, help="每隔多少个 episode 做一次多地图综合验证。")
+    parser.add_argument("--eval_episodes", type=int, default=3, help="每种地图评估多少个 episode。")
+
     args = parser.parse_args()
 
     # =========================================================
@@ -141,7 +233,7 @@ def parse_args():
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
     args.action_dim = 2
-    args.obs_size = 34
+    args.obs_size = 35
 
     return args
 
@@ -154,12 +246,12 @@ def main():
     # 1. 训练参数与工程目录设置
     # ==========================================
     train_iterations = args.train_iterations
-    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
+    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    # resume_checkpoint = None  
-    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint" 
+    resume_checkpoint = None  
+    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -175,10 +267,12 @@ def main():
     writer = SummaryWriter(log_dir=save_root_dir)
 
     config = {
-        "num_robots": args.num_robots, 
-        "max_steps": args.max_steps, 
-        "render": args.render,  # <--- 动态读取命令行参数
-        "sensing_radius": args.sensing_radius
+        "num_robots": args.num_robots,
+        "max_steps": args.max_steps,
+        "render": args.render,
+        "sensing_radius": args.sensing_radius,
+        "map_mode": "custom",
+        "custom_map_path": "/home/nankai/formation_test/maps/underground_garage5.pgm",
     }
 
     # ==========================================
@@ -207,51 +301,59 @@ def main():
     # ==========================================
     # 4. 开始炼丹大循环
     # ==========================================
+    best_checkpoint_dir = os.path.join(save_root_dir, "best_avg_checkpoint")
+    best_avg_score = -1e18
+
     for episode in range(start_episode, train_iterations):
 
         if episode < 2000:
-            current_noise = 0.08
+            current_noise = 0.15
         else:
             progress = min(1.0, (episode - 2000) / 1000)
             current_noise = 0.10 - progress * 0.09
             current_noise = max(current_noise, 0.01)
-        
+
+        # [新增] 课程训练：每局先选地图
+        map_mode = choose_map_mode(episode)
+        env.set_map_mode(map_mode)
 
         obs_dict, _ = env.reset()
-        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids])
-        
+        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
 
         h_in, c_in = agent.init_hidden()
-        agent.reset_runtime()  # [新增] 每个 episode 都清 runtime delay buffer
+        agent.reset_runtime()
 
         episode_reward = 0.0
         actor_losses = []
         critic_losses = []
-        
+
         for step in range(args.max_steps):
-            # 前向决策
             action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
-                obs_array, h_in, c_in, add_noise=True, noise_scale=current_noise
+                obs_array,
+                h_in,
+                c_in,
+                add_noise=True,
+                noise_scale=current_noise,
             )
+
             action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
             graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
             graphs_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
 
-            # 环境步进
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(action_dict, graph_dict, graphs_soft_dict)
-            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids])
-            
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
+                action_dict,
+                graph_dict,
+                graphs_soft_dict,
+            )
+            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
             team_reward = reward_dict[env._agent_ids[0]]
-            # print("terminated_dict:", terminated_dict, "truncated_dict:", truncated_dict)
             team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
-            # print( "team_done:", team_done)
-            
-            # 存入经验池
-            # 存入 Buffer 时，把旧记忆(in)和新记忆(out)一起转成 numpy 存进去
+
             buffer.store({
                 "obs": obs_array,
-                "action_exec" : action_exec,        # 给 critic / 环境
-                "action_policy" : action_policy,    # 给 CoDe decoder
+                "action_exec": action_exec,
+                "action_policy": action_policy,
                 "reward": float(team_reward),
                 "next_obs": next_obs_array,
                 "done": float(team_done),
@@ -262,9 +364,7 @@ def main():
                 "prev_action": comm_snapshot["prev_action"],
                 "route_hard": comm_snapshot["route_hard"],
                 "route_soft": comm_snapshot["route_soft"],
-                "sender_intents_recv": comm_snapshot["sender_intents_recv"],
-                "sender_hidden_recv": comm_snapshot["sender_hidden_recv"],
-                "recv_mask": comm_snapshot["recv_mask"],
+                "recv_mask": comm_snapshot["recv_mask"], 
                 "time_lags": comm_snapshot["time_lags"],
                 "episode_id": episode,
                 "step_id": step,
@@ -274,38 +374,57 @@ def main():
             h_in, c_in = h_out, c_out
             episode_reward += team_reward
 
-            learning_starts = 2000  # 先积累一些经验再开始学习
+            learning_starts = 2000
             if buffer.size() >= learning_starts:
                 metrics = agent.update(buffer)
                 actor_losses.append(metrics["actor_loss"])
                 critic_losses.append(metrics["critic_loss"])
-            
+
             if team_done:
                 break
-                
-        # 计算整局平均 Loss
+
         avg_a_loss = np.mean(actor_losses) if actor_losses else 0.0
         avg_c_loss = np.mean(critic_losses) if critic_losses else 0.0
-
         step_avg_reward = episode_reward / (step + 1)
 
-        # 控制台打印进度
-        print(f"Episode: {episode:5d} | Steps: {step+1:3d} | Reward: {step_avg_reward:8.2f} | A_Loss: {avg_a_loss:.4f} | C_Loss: {avg_c_loss:.4f}")
-        
-        # ✅ TensorBoard 记录曲线
+        print(
+            f"Episode: {episode:5d} | Map: {map_mode:>5s} | Steps: {step+1:3d} | "
+            f"Reward: {step_avg_reward:8.2f} | A_Loss: {avg_a_loss:.4f} | C_Loss: {avg_c_loss:.4f}"
+        )
+
         writer.add_scalar("Training/Episode_Reward", episode_reward, episode)
         writer.add_scalar("Training/Episode_Length", step + 1, episode)
         writer.add_scalar("Loss/Actor_Loss", avg_a_loss, episode)
         writer.add_scalar("Loss/Critic_Loss", avg_c_loss, episode)
         writer.add_scalar("Training/Avg_Step_Reward", step_avg_reward, episode)
+        writer.add_scalar("Training/MapMode_Open", 1.0 if map_mode == "open" else 0.0, episode)
 
-        # ✅ 每 50 局保存一次检查点，并覆盖 latest_checkpoint
-        if (episode + 1) % 50 == 0:
-            if os.path.exists(fixed_checkpoint_dir):
-                shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
-            save_checkpoint(agent, episode + 1, fixed_checkpoint_dir)
-            buffer.save(fixed_checkpoint_dir)
-            print(f"💾 [Checkpoint 已更新] 最新模型 -> {fixed_checkpoint_dir}")
+        # latest checkpoint
+        if (episode + 1) % args.eval_every == 0:
+            
+            # 定义期末考试科目（你可以把想考的地图都写上）
+            eval_maps = ["open", "z_map", "star_map", "custom"]
+            scores = {}
+            
+            print(f"📊 Eval @ episode {episode+1}: ", end="")
+            for m in eval_maps:
+                score = evaluate_on_map(agent, env, m, args.eval_episodes, args.max_steps)
+                scores[m] = score
+                writer.add_scalar(f"Eval/{m}_Reward", score, episode)
+                print(f"{m}={score:.2f}, ", end="")
+                
+            # 计算平均分作为保存 best_model 的依据
+            score_avg = np.mean(list(scores.values()))
+            writer.add_scalar("Eval/AvgReward", score_avg, episode)
+            
+            print(f"avg={score_avg:.2f}")
+
+            if score_avg > best_avg_score:
+                best_avg_score = score_avg
+                if os.path.exists(best_checkpoint_dir):
+                    shutil.rmtree(best_checkpoint_dir, ignore_errors=True)
+                save_checkpoint(agent, episode + 1, best_checkpoint_dir)
+                print(f"🏆 [Best Avg Checkpoint Updated] -> {best_checkpoint_dir}")
 
     # 训练彻底结束时保存最终模型
     if os.path.exists(fixed_checkpoint_dir):
