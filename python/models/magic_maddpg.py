@@ -372,7 +372,12 @@ class MAGICCoDeActor(nn.Module):
                 intents, sender_hidden
             )
 
-            available_mask = external_comm["recv_mask"]   # 这是硬可用性，不参与学习
+            # available_mask = external_comm["recv_mask"]   # 这是硬可用性，不参与学习
+
+            # 假装物理信道全通，把切断信道的生杀大权完全交给下面的 route_gate！
+            eye_mask = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
+            available_mask = (1.0 - eye_mask).expand(b, n, n).clone()
+
             time_lags = external_comm["time_lags"]
 
             # 训练时让 scheduler 收到梯度：

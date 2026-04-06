@@ -46,7 +46,9 @@ def load_checkpoint(agent, path):
 CURRICULUM_SCHEDULE = [
     (0,    {"open": 1.0}),                                   
     (500, {"open": 0.4, "star_map": 0.6}),                     
-    (2000, {"open": 0.2, "star_map": 0.3, "z_map": 0.5}),                     
+    (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
+    (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
+    (4000, {"open": 0.2, "star_map": 0.3, "z_map": 0.5}),                     
     (5000, {"open": 0.1, "star_map": 0.2, "z_map": 0.2, "custom": 0.5}) 
 ]
 
@@ -144,7 +146,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的 batch 大小。")
     parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池最多可存储的 transition 数量。")
     parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
-    parser.add_argument("--render", action="store_true", default=True, help="是否开启环境渲染。训练时通常关闭以提升速度。")
+    parser.add_argument("--render", action="store_true", default=False, help="是否开启环境渲染。训练时通常关闭以提升速度。")
 
     # =========================================================
     # 二、MADDPG 强化学习参数
@@ -246,12 +248,12 @@ def main():
     # 1. 训练参数与工程目录设置
     # ==========================================
     train_iterations = args.train_iterations
-    base_save_dir = "/home/lpp/formation_test/data" # 你的数据保存目录
+    base_save_dir = "/home/nankai/formation_test/data" # 你的数据保存目录
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_e0ea8e_2026-03-30_11-01-41/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_0910d9_2026-04-03_17-30-05/best_avg_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -272,7 +274,7 @@ def main():
         "render": args.render,
         "sensing_radius": args.sensing_radius,
         "map_mode": "custom",
-        "custom_map_path": "/home/nankai/formation_test/maps/underground_garage5.pgm",
+        "custom_map_path": "/home/nankai/formation_test/maps/underground_garage1.pgm",
     }
 
     # ==========================================
@@ -426,9 +428,13 @@ def main():
                 save_checkpoint(agent, episode + 1, best_checkpoint_dir)
                 print(f"🏆 [Best Avg Checkpoint Updated] -> {best_checkpoint_dir}")
 
+            # 覆盖保存最新的大脑
+            save_checkpoint(agent, episode + 1, fixed_checkpoint_dir)
+            # 覆盖保存最新的经验池 (由于文件较大，每 50 局存一次既安全又不拖慢训练)
+            buffer.save(fixed_checkpoint_dir)
+            print(f"[Latest Checkpoint Saved] 进度已存档 -> {fixed_checkpoint_dir}")
+
     # 训练彻底结束时保存最终模型
-    if os.path.exists(fixed_checkpoint_dir):
-        shutil.rmtree(fixed_checkpoint_dir, ignore_errors=True)
     save_checkpoint(agent, train_iterations, fixed_checkpoint_dir)
     buffer.save(fixed_checkpoint_dir)
     print(f"\n🎉 训练全部结束！最终模型保存在: {fixed_checkpoint_dir}")

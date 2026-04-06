@@ -109,7 +109,6 @@ class MADDPG_Agent:
         # 2) Actor RL + receiver-side comm snapshot
         # --------------------
         external_comm = {
-            "recv_mask": batch["recv_mask"],
             "time_lags": batch["time_lags"],
         }
         curr_actions, _, _, _, aux = self.actor(

@@ -19,10 +19,13 @@ def parse_args():
     # =========================================================
     # [新增] 评估专属参数
     # =========================================================
-    parser.add_argument("--model_dir", type=str, required=True, help="要评估的模型文件夹路径 (包含 maddpg_checkpoint.pt 的目录)。")
+    parser.add_argument("--model_dir", type=str, 
+                        default="/home/nankai/formation_test/data/MADDPG_Formation_0910d9_2026-04-03_17-30-05/latest_checkpoint",
+                        help="要评估的模型文件夹路径 (包含 maddpg_checkpoint.pt 的目录)。")
+    
     parser.add_argument("--eval_episodes", type=int, default=10, help="评估多少局。")
-    parser.add_argument("--map_mode", type=str, default="custom", choices=["open", "z_map", "custom"], help="你想在哪个地图上评估模型？")
-    parser.add_argument("--custom_map_path", type=str, default="/home/lpp/formation_test/maps/underground_garage5.pgm", help="真实地图路径。")
+    parser.add_argument("--map_mode", type=str, default="z_map", choices=["open", "z_map", "star_map", "custom"], help="你想在哪个地图上评估模型？")
+    parser.add_argument("--custom_map_path", type=str, default="/home/nankai/formation_test/maps/underground_garage5.pgm", help="真实地图路径。")
 
 
     # =========================================================
