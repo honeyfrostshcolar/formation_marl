@@ -35,6 +35,7 @@ class MADDPGFormationReward:
         alpha = 0 -> line
         alpha = 1 -> V
         """
+        # print(f"corridor_width: {corridor_width}")
         alpha = np.clip(
             (corridor_width - self.narrow_width) / (self.wide_width - self.narrow_width),
             0.0,

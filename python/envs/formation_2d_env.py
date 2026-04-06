@@ -176,7 +176,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             goal_idx = self._get_random_free_point()
             
             # start_pos = [-7.5,-8.3]
-            # goal_pos = [-7.5, 7.5]
+            # goal_pos = [7.5, -8.3]
             # start_idx = self._world_to_grid(*start_pos)
             # goal_idx = self._world_to_grid(*goal_pos)
 
@@ -391,18 +391,27 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         # 1. 算雷达 (保持不变)
         lidar_data = self._simulate_radar(my_pos)
-        feature_extractor = formation_core.FeatureExtractor(8)
-        features = feature_extractor.extract_features(lidar_data)
+        ranges = np.array(lidar_data.ranges)
 
-        lidar_obs = np.zeros(21, dtype=np.float32)
-        lidar_obs[0] = features.corridor_width
-        lidar_obs[1] = features.front_clearance
-        lidar_obs[2] = features.left_clearance
-        lidar_obs[3] = features.right_clearance
-        lidar_obs[4] = features.obstacle_density
-        lidar_obs[5:13] = np.array(features.sector_min_dists, dtype=np.float32)
-        lidar_obs[13:21] = np.array(features.sector_avg_dists, dtype=np.float32)
-        lidar_obs = np.round(lidar_obs, 1)
+        front_rays = np.concatenate([ranges[175:180], ranges[0:6]])
+        front_clearance = float(np.min(front_rays))
+        left_clearance = float(np.min(ranges[40:51]))
+        right_clearance = float(np.min(ranges[130:141]))
+        corridor_width = left_clearance + right_clearance
+        obstacle_density = float(np.sum(ranges < 3.0) / len(ranges))
+        
+        core_features = np.array([
+            corridor_width, front_clearance, left_clearance, right_clearance, obstacle_density
+        ], dtype=np.float32)
+
+
+        num_downsample = 36
+        sectors = np.array_split(ranges, num_downsample)
+        downsampled_lidar = np.array([np.min(sec) for sec in sectors], dtype=np.float32)
+        
+        # 拼起来组成新的雷达观测 (5 + 36 = 41 维)
+        lidar_obs = np.concatenate([core_features, downsampled_lidar])
+        # lidar_obs = np.round(lidar_obs, 2)
 
         # 坐标转换函数：将全局向量转为老大的局部坐标系
         cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
@@ -451,7 +460,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         rank_norm = rank / max_rank
         role_code = np.array([side, rank_norm], dtype=np.float32)
 
-        formation_alpha = self.reward_fn.compute_formation_alpha(features.corridor_width)
+        formation_alpha = self.reward_fn.compute_formation_alpha(corridor_width)
         formation_alpha_obs = np.array([formation_alpha], dtype=np.float32)
 
         obs = np.concatenate([lidar_obs, leader_rel, teammates_obs, role_code, formation_alpha_obs])
