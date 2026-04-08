@@ -111,12 +111,17 @@ class MAGICCoDeActor(nn.Module):
         # initialize the action head (in practice, one action head is used)
         # policy head 输入维度改为 h + intent + fused
         policy_in_dim = args.hid_size + args.intent_dim + args.value_dim
-        self.action_head = nn.Sequential(
+
+        self.policy_backbone = nn.Sequential(
             nn.Linear(policy_in_dim, args.hid_size),
             nn.ReLU(),
-            nn.Linear(args.hid_size, args.action_dim),
-            nn.Tanh(),
         )
+
+        self.mu_head = nn.Linear(args.hid_size, args.action_dim)
+        self.log_std_head = nn.Linear(args.hid_size, args.action_dim)
+
+        self.log_std_min = args.log_std_min
+        self.log_std_max = args.log_std_max
 
     def reset_runtime_state(self, batch_size: int = 1):
         self.runtime_buffer.reset(self.nagents)
@@ -256,6 +261,40 @@ class MAGICCoDeActor(nn.Module):
         )
         return pred_seq.reshape(b, n, k, self.action_dim)
     
+    def _build_policy_dist(self, policy_feat: torch.Tensor):
+        hidden = self.policy_backbone(policy_feat)
+        mu = self.mu_head(hidden)
+        log_std = self.log_std_head(hidden)
+        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
+        std = torch.exp(log_std)
+        return mu, log_std, std
+
+
+    def _sample_squashed_action(
+        self,
+        mu: torch.Tensor,
+        std: torch.Tensor,
+        deterministic: bool = False,
+        with_logprob: bool = True,
+    ):
+        dist = torch.distributions.Normal(mu, std)
+
+        if deterministic:
+            pre_tanh = mu
+        else:
+            pre_tanh = dist.rsample()
+
+        action = torch.tanh(pre_tanh)
+
+        log_prob = None
+        if with_logprob:
+            log_prob = dist.log_prob(pre_tanh)
+            # tanh-squash 修正项
+            log_prob = log_prob - torch.log(1.0 - action.pow(2) + 1e-6)
+            log_prob = log_prob.sum(dim=-1, keepdim=True)
+
+        return action, log_prob, pre_tanh
+    
     def _build_receiver_major_sender_tensors(
         self,
         intents: torch.Tensor,         # [B, N, E]
@@ -282,6 +321,7 @@ class MAGICCoDeActor(nn.Module):
         prev_action: Optional[torch.Tensor] = None,
         runtime_mode: bool = False,
         external_comm: Optional[Dict[str, torch.Tensor]] = None,
+        deterministic_action: bool = False,
     ):
         
 
@@ -428,14 +468,23 @@ class MAGICCoDeActor(nn.Module):
             fused_msg = self.message_decoder(fused_msg)
 
         policy_feat = torch.cat([h_out, intents, fused_msg], dim=-1)
-        actions_out = self.action_head(policy_feat)
+
+        mu, log_std, std = self._build_policy_dist(policy_feat)
+        action_mean = torch.tanh(mu)
+
+        actions_out, log_prob, pre_tanh = self._sample_squashed_action(
+            mu, std, deterministic=deterministic_action, with_logprob=True
+        )
 
         if runtime_mode:
-            self.runtime_prev_action = actions_out.detach().clone()
+            # CoDe/IntentDecoder 继续跟“行为趋势”走，不跟采样噪声走
+            self.runtime_prev_action = action_mean.detach().clone()
 
         aux = {
             "mu": mu,
-            "logvar": logvar,
+            "log_std": log_std,
+            "log_prob": log_prob,
+            "pre_tanh": pre_tanh,
             "intents": intents,
             "history_h": h_out,
             "sender_hidden": sender_hidden,
@@ -448,6 +497,7 @@ class MAGICCoDeActor(nn.Module):
             "alpha_hat": fusion_out["alpha_hat"],
             "online_delay": online_delay,
             "prev_action_used": prev_action,
+            "action_mean": action_mean,
         }
 
         return actions_out, route_hard, route_soft, (h_out, c_out), aux
@@ -456,24 +506,47 @@ class MAGICCoDeActor(nn.Module):
 
 class Centralized_Critic(nn.Module):
     """
-    上帝视角评论家 (集中式 Critic)
-    输入：所有人的观测 + 所有人的动作
-    输出：一个全局 Q 值打分
+    MASAC 用的双 centralized critics
+    输入：所有 agent 的 obs + 所有 agent 的 actions
+    输出：Q1, Q2
     """
     def __init__(self, num_followers, obs_dim, action_dim):
         super(Centralized_Critic, self).__init__()
-        # Critic 需要看全图，所以输入维度是 N 个人的 obs 和 N 个人的 action 拼接在一起
         self.global_obs_dim = num_followers * obs_dim
         self.global_action_dim = num_followers * action_dim
-        
-        self.fc1 = nn.Linear(self.global_obs_dim + self.global_action_dim, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 1) # 输出一个 Q 值
+        in_dim = self.global_obs_dim + self.global_action_dim
+
+        # Q1
+        self.q1_fc1 = nn.Linear(in_dim, 512)
+        self.q1_fc2 = nn.Linear(512, 256)
+        self.q1_fc3 = nn.Linear(256, 128)
+        self.q1_out = nn.Linear(128, 1)
+
+        # Q2
+        self.q2_fc1 = nn.Linear(in_dim, 512)
+        self.q2_fc2 = nn.Linear(512, 256)
+        self.q2_fc3 = nn.Linear(256, 128)
+        self.q2_out = nn.Linear(128, 1)
 
     def forward(self, global_obs, global_actions):
-        # 将全局状态和全局动作拼接
         x = torch.cat([global_obs, global_actions], dim=-1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        q_value = self.fc3(x)
-        return q_value
+
+        q1 = F.relu(self.q1_fc1(x))
+        q1 = F.relu(self.q1_fc2(q1))
+        q1 = F.relu(self.q1_fc3(q1))
+        q1 = self.q1_out(q1)
+
+        q2 = F.relu(self.q2_fc1(x))
+        q2 = F.relu(self.q2_fc2(q2))
+        q2 = F.relu(self.q2_fc3(q2))
+        q2 = self.q2_out(q2)
+
+        return q1, q2
+
+    def Q1(self, global_obs, global_actions):
+        x = torch.cat([global_obs, global_actions], dim=-1)
+        q1 = F.relu(self.q1_fc1(x))
+        q1 = F.relu(self.q1_fc2(q1))
+        q1 = F.relu(self.q1_fc3(q1))
+        q1 = self.q1_out(q1)
+        return q1

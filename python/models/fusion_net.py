@@ -82,7 +82,6 @@ class DualAlignmentFusion(nn.Module):
         if time_lags is None:
             time_lags = torch.zeros(b, n, n, device=device, dtype=dtype)
 
-        
         # ===== 1) QKV =====
         query = self.WQ(receiver_intents)                    # [B, N, D]
         key = self.WK(sender_intents)                        # [B, N, N, D]

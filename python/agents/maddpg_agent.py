@@ -8,15 +8,13 @@ from models.magic_maddpg import Centralized_Critic
 from utils.code_losses import total_intent_loss, total_training_loss
 
 
-class MADDPG_Agent:
-    """[MOD 9] 整理后的 Agent。
-
-    核心变化:
-    - select_action 使用 runtime delay buffer
-    - update 同时优化 RL loss + CoDe auxiliary losses
-    - 训练时 receiver-side 使用 replay 中保存的 comm snapshot
+class MASAC_Agent:
     """
-
+    最小侵入版 MASAC：
+    - 保留 MAGIC + CoDe 通信前端
+    - RL 外壳从 MADDPG 换成 MASAC
+    - 使用 twin critics + entropy regularization
+    """
     def __init__(self, args):
         self.args = args
         self.num_followers = args.num_followers
@@ -34,6 +32,24 @@ class MADDPG_Agent:
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.lr_critic)
 
+        init_temperature = float(args.init_temperature)
+        self.log_alpha = torch.tensor(
+            np.log(init_temperature),
+            dtype=torch.float32,
+            device=self.device,
+            requires_grad=True,
+        )
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=args.lr_alpha)
+
+        if args.target_entropy is None:
+            self.target_entropy = -float(args.action_dim * args.num_followers)
+        else:
+            self.target_entropy = float(args.target_entropy)
+
+    @property
+    def alpha(self):
+        return self.log_alpha.exp()
+
     def reset_runtime(self):
         self.actor.reset_runtime_state(batch_size=1)
         self.target_actor.reset_runtime_state(batch_size=1)
@@ -43,8 +59,9 @@ class MADDPG_Agent:
         c = torch.zeros(1, self.num_followers, self.args.hid_size, device=self.device)
         return h, c
 
-    def select_action(self, obs_array, h_in, c_in, add_noise=True, noise_scale=0.15):
+    def select_action(self, obs_array, h_in, c_in, deterministic=False):
         obs_tensor = torch.as_tensor(obs_array, dtype=torch.float32, device=self.device).unsqueeze(0)
+
         self.actor.eval()
         with torch.no_grad():
             action_tensor, hard_weights, soft_weights, (h_out, c_out), aux = self.actor(
@@ -53,20 +70,23 @@ class MADDPG_Agent:
                 prev_action=None,
                 runtime_mode=True,
                 external_comm=None,
+                deterministic_action=deterministic,
             )
         self.actor.train()
 
-        action = action_tensor.squeeze(0).cpu().numpy()
-        action_policy = action_tensor.squeeze(0).cpu().numpy()
-        action_exec = action_policy.copy()
+        # action_exec: 真正送进环境的动作
+        action_exec = action_tensor.squeeze(0).cpu().numpy()
+
+        # action_policy: 用于 CoDe / replay supervision 的“无噪策略均值动作”
+        action_policy = aux["action_mean"].squeeze(0).cpu().numpy()
+
+        # eval 时直接执行均值动作
+        if deterministic:
+            action_exec = action_policy.copy()
+
         graphs = hard_weights.squeeze(0).cpu().numpy()
         graphs_soft = soft_weights.squeeze(0).cpu().numpy()
 
-        if add_noise:
-            noise = np.random.normal(0, noise_scale, size=action_exec.shape)
-            action_exec = np.clip(action_exec + noise, -1.0, 1.0)
-
-        # [MOD 9-1] 把 rollout 时真正使用的 receiver-side snapshot 一并返回，方便存入 buffer
         comm_snapshot = {
             "prev_action": aux["prev_action_used"].squeeze(0).cpu().numpy(),
             "route_hard": aux["route_hard"].squeeze(0).cpu().numpy(),
@@ -74,6 +94,7 @@ class MADDPG_Agent:
             "recv_mask": aux["recv_mask"].squeeze(0).cpu().numpy(),
             "time_lags": aux["time_lags"].squeeze(0).cpu().numpy(),
         }
+
         return action_policy, action_exec, graphs, graphs_soft, h_out, c_out, comm_snapshot
 
     def update(self, replay_buffer):
@@ -85,43 +106,59 @@ class MADDPG_Agent:
         global_actions = batch["action"].reshape(bsz, -1)
 
         # --------------------
-        # 1) Critic
+        # 1) Twin Critic update
         # --------------------
         with torch.no_grad():
-            next_actions, _, _, _, _ = self.target_actor(
+            next_actions, _, _, _, next_aux = self.target_actor(
                 batch["next_obs"],
                 (batch["h_out"], batch["c_out"]),
-                prev_action=batch["action"],
+                prev_action=batch["action_policy"],   # t 时刻的均值动作作为 t+1 的 prev_action
                 runtime_mode=False,
-                external_comm=None,  # [MOD 9-2] 目标策略这里采用同步近似，避免再引入 next-step buffer 复杂度
+                external_comm=None,
+                deterministic_action=False,
             )
-            target_q = self.target_critic(global_next_obs, next_actions.reshape(bsz, -1))
-            target_q_val = batch["reward"] + (1.0 - batch["done"]) * self.gamma * target_q
 
-        current_q = self.critic(global_obs, global_actions)
-        critic_loss = F.mse_loss(current_q, target_q_val)
+            next_joint_log_prob = next_aux["log_prob"].sum(dim=1)  # [B, 1]
+
+            target_q1, target_q2 = self.target_critic(
+                global_next_obs,
+                next_actions.reshape(bsz, -1),
+            )
+            target_v = torch.min(target_q1, target_q2) - self.alpha.detach() * next_joint_log_prob
+            target_q_val = batch["reward"] + (1.0 - batch["done"]) * self.gamma * target_v
+
+        current_q1, current_q2 = self.critic(global_obs, global_actions)
+        critic_loss = F.mse_loss(current_q1, target_q_val) + F.mse_loss(current_q2, target_q_val)
+
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
         # --------------------
-        # 2) Actor RL + receiver-side comm snapshot
+        # 2) Actor SAC loss + receiver-side comm snapshot
         # --------------------
         external_comm = {
             "time_lags": batch["time_lags"],
         }
+
         curr_actions, _, _, _, aux = self.actor(
             batch["obs"],
             (batch["h_in"], batch["c_in"]),
             prev_action=batch["prev_action"],
             runtime_mode=False,
             external_comm=external_comm,
+            deterministic_action=False,
         )
-        actor_rl_loss = -self.critic(global_obs, curr_actions.reshape(bsz, -1)).mean()
+
+        curr_joint_log_prob = aux["log_prob"].sum(dim=1)  # [B, 1]
+        q1_pi, q2_pi = self.critic(global_obs, curr_actions.reshape(bsz, -1))
+        q_pi = torch.min(q1_pi, q2_pi)
+
+        actor_sac_loss = (self.alpha.detach() * curr_joint_log_prob - q_pi).mean()
 
         # --------------------
-        # 3) CoDe auxiliary losses 辅助损失
+        # 3) CoDe auxiliary losses
         # --------------------
         num_valid_anchors = replay_buffer.num_valid_intent_anchors(self.args.pred_horizon)
 
@@ -163,7 +200,7 @@ class MADDPG_Agent:
                 logvar=logvar_curr.reshape(bn, -1),
             )
         else:
-            zero = actor_rl_loss.new_zeros(())
+            zero = actor_sac_loss.new_zeros(())
             intent_loss_dict = {
                 "L_inf": zero,
                 "L_c": zero,
@@ -171,7 +208,7 @@ class MADDPG_Agent:
                 "L_int": zero,
             }
 
-        total_losses = total_training_loss(actor_rl_loss, intent_loss_dict, aux["L_e"])
+        total_losses = total_training_loss(actor_sac_loss, intent_loss_dict, aux["L_e"])
 
         self.actor_optimizer.zero_grad()
         total_losses["L_total"].backward()
@@ -179,20 +216,31 @@ class MADDPG_Agent:
         self.actor_optimizer.step()
 
         # --------------------
-        # 4) soft update
+        # 4) Temperature alpha update
+        # --------------------
+        alpha_loss = -(self.log_alpha * (curr_joint_log_prob + self.target_entropy).detach()).mean()
+
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+
+        # --------------------
+        # 5) Soft update target networks
         # --------------------
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
+
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
 
-        metrics = {
+        return {
             "actor_loss": float(total_losses["L_total"].item()),
             "critic_loss": float(critic_loss.item()),
-            "rl_loss": float(total_losses["L_rl"].item()),
-            "L_inf": float(total_losses["L_inf"].item()),
-            "L_c": float(total_losses["L_c"].item()),
-            "L_k": float(total_losses["L_k"].item()),
-            "L_e": float(total_losses["L_e"].item()),
+            "rl_loss": float(actor_sac_loss.item()),
+            "alpha_loss": float(alpha_loss.item()),
+            "alpha": float(self.alpha.item()),
+            "L_inf": float(intent_loss_dict["L_inf"].item()),
+            "L_c": float(intent_loss_dict["L_c"].item()),
+            "L_k": float(intent_loss_dict["L_k"].item()),
+            "L_e": float(aux["L_e"].item()),
         }
-        return metrics

@@ -8,7 +8,7 @@ import argparse
 from torch.utils.tensorboard import SummaryWriter # 原生 TensorBoard
 
 from envs.formation_2d_env import Formation2DMultiAgentEnv 
-from agents.maddpg_agent import MADDPG_Agent             
+from agents.maddpg_agent import MASAC_Agent           
 from utils.replay_buffer import ReplayBuffer             
 
 # ==========================================
@@ -24,6 +24,8 @@ def save_checkpoint(agent, episode, path):
         'target_critic': agent.target_critic.state_dict(),
         'actor_optimizer': agent.actor_optimizer.state_dict(),
         'critic_optimizer': agent.critic_optimizer.state_dict(),
+        'log_alpha': agent.log_alpha.detach().cpu(),
+        'alpha_optimizer': agent.alpha_optimizer.state_dict(),
     }
     torch.save(checkpoint, os.path.join(path, "maddpg_checkpoint.pt"))
 
@@ -40,6 +42,12 @@ def load_checkpoint(agent, path):
         agent.target_critic.load_state_dict(checkpoint['target_critic'])
         agent.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
         agent.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+
+        if 'log_alpha' in checkpoint:
+            agent.log_alpha.data.copy_(checkpoint['log_alpha'].to(agent.device))
+        if 'alpha_optimizer' in checkpoint:
+            agent.alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer'])
+
         return checkpoint['episode']
     return 0
 
@@ -102,7 +110,7 @@ def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: in
                 obs_array,
                 h_in,
                 c_in,
-                add_noise=False,
+                deterministic=True,
             )
 
             action_dict = {env._agent_ids[i]: action_exec[i] for i in range(agent.num_followers)}
@@ -146,7 +154,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的 batch 大小。")
     parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池最多可存储的 transition 数量。")
     parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
-    parser.add_argument("--render", action="store_true", default=True, help="是否开启环境渲染。训练时通常关闭以提升速度。")
+    parser.add_argument("--render", action="store_true", default=False, help="是否开启环境渲染。训练时通常关闭以提升速度。")
 
     # =========================================================
     # 二、MADDPG 强化学习参数
@@ -227,10 +235,19 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=50, help="每隔多少个 episode 做一次多地图综合验证。")
     parser.add_argument("--eval_episodes", type=int, default=3, help="每种地图评估多少个 episode。")
 
+    # =========================================================
+    # 十、SAC 参数
+    # =========================================================
+    parser.add_argument("--lr_alpha", type=float, default=3e-4, help="SAC 温度参数 alpha 的学习率。")
+    parser.add_argument("--init_temperature", type=float, default=0.2, help="SAC 初始温度 alpha。")
+    parser.add_argument("--target_entropy", type=float, default=-2.0, help="SAC 目标熵；二维连续动作通常先设为 -action_dim。")
+    parser.add_argument("--log_std_min", type=float, default=-5.0, help="策略高斯分布 log_std 的下界。")
+    parser.add_argument("--log_std_max", type=float, default=2.0, help="策略高斯分布 log_std 的上界。")
+
     args = parser.parse_args()
 
     # =========================================================
-    # 十、自动派生参数
+    # 十一、自动派生参数
     # =========================================================
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
@@ -281,7 +298,7 @@ def main():
     # 2. 初始化环境、智能体和经验池
     # ==========================================
     env = Formation2DMultiAgentEnv(config)
-    agent = MADDPG_Agent(args)
+    agent = MASAC_Agent(args)
     buffer = ReplayBuffer(args.buffer_capacity, args.num_followers, args.obs_size, args.action_dim, args.hid_size, args.intent_dim, args.value_dim ,device)
     batch_size = args.batch_size # 每次更新的批量大小
 
@@ -308,12 +325,12 @@ def main():
 
     for episode in range(start_episode, train_iterations):
 
-        if episode < 2000:
-            current_noise = 0.15
-        else:
-            progress = min(1.0, (episode - 2000) / 1000)
-            current_noise = 0.10 - progress * 0.09
-            current_noise = max(current_noise, 0.01)
+        # if episode < 2000:
+        #     current_noise = 0.15
+        # else:
+        #     progress = min(1.0, (episode - 2000) / 1000)
+        #     current_noise = 0.10 - progress * 0.09
+        #     current_noise = max(current_noise, 0.01)
 
         # [新增] 课程训练：每局先选地图
         map_mode = choose_map_mode(episode)
@@ -334,8 +351,7 @@ def main():
                 obs_array,
                 h_in,
                 c_in,
-                add_noise=True,
-                noise_scale=current_noise,
+                deterministic=False,
             )
 
             action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
