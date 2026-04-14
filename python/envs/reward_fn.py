@@ -6,7 +6,7 @@ class MADDPGFormationReward:
     专为 MADDPG + G2ANet 打造的物理结果导向奖励函数 (融合版)
     融合了动态拓扑距离约束与硬性物理防撞/防抖底线。
     """
-    def __init__(self, safety_threshold=0.5, target_distance=1.5, max_distance=4.0):
+    def __init__(self, safety_threshold=0.5, target_distance=1.0, max_distance=4.0):
         # 物理边界定义
         self.safety_threshold = safety_threshold # 互碰红线 (米)
         self.target_distance = target_distance   # 目标连线距离 (米)
@@ -23,11 +23,11 @@ class MADDPGFormationReward:
         self.w_iso = 5.0    # 孤立惩罚：如果谁也不连，当场重罚
         self.w_sparsity = 0.2   # 稀疏惩罚：每多连一条线扣一点分，逼迫图精简
         
-        self.w_separation = 0.5  # 分离度：无差别防互撞的惩罚权重 (底线，给很高)
+        self.w_separation = 1.0  # 分离度：无差别防互撞的惩罚权重 (底线，给很高)
         self.w_danger = 2.0      # 危险区：撞墙/进入障碍物膨胀层的重罚权重 (保命)
         self.w_jitter = 1.0      # 平滑度：过度抖动/能量损耗的惩罚权重
-        self.w_direction = 8.0   # 方向感：保持在老大后方的得分权重
-        self.w_geometry = 2.0    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
+        self.w_direction = 1.0   # 方向感：保持在老大后方的得分权重
+        self.w_geometry = 0.1    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
 
     def compute_formation_alpha(self, corridor_width: float) -> float:
         """
@@ -148,7 +148,7 @@ class MADDPGFormationReward:
         # ✅ 修改 2：第4部分 彻底升级为【软切换 + 纵向容忍】架构
         # ==========================================
         geometry_score = 0.0
-        v_angle = np.pi / 4 
+        v_angle = np.pi / 6 
         
         # 计算软切换系数 alpha (0 代表纯1字，1 代表纯V字)
         # narrow_width = 3.0   wide_width = 5.0
