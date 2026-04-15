@@ -235,7 +235,7 @@ def parse_args():
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
     args.action_dim = 2
-    args.obs_size = 55
+    args.obs_size = 58
 
     return args
 
@@ -252,8 +252,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    # resume_checkpoint = None  
-    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_c11fe1_2026-04-14_10-15-30/latest_checkpoint" 
+    resume_checkpoint = None  
+    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_c11fe1_2026-04-14_10-15-30/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
