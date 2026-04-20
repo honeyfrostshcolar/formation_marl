@@ -53,7 +53,7 @@ class MAGICCoDeActor(nn.Module):
         self.intent_decoder = IntentDecoder(args) # 意图解码器
 
         self.belief_dim = 32
-        self.leader_belief_encoder = LeaderBeliefEncoder(args.hid_size, lidar_dim=41, belief_dim=self.belief_dim)
+        self.leader_belief_encoder = LeaderBeliefEncoder(args.hid_size, lidar_dim=46, belief_dim=self.belief_dim)
         self.leader_belief_decoder = LeaderBeliefDecoder(args.hid_size, pred_horizon=args.pred_horizon, belief_dim=self.belief_dim)
 
         # 接收方

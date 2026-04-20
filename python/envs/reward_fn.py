@@ -148,7 +148,7 @@ class MADDPGFormationReward:
         # ✅ 修改 2：第4部分 彻底升级为【软切换 + 纵向容忍】架构
         # ==========================================
         geometry_score = 0.0
-        v_angle = np.pi / 6 
+        v_angle = np.pi / 4 
         
         # 计算软切换系数 alpha (0 代表纯1字，1 代表纯V字)
         # narrow_width = 3.0   wide_width = 5.0

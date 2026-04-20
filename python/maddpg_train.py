@@ -44,7 +44,7 @@ def load_checkpoint(agent, path):
     return 0
 
 CURRICULUM_SCHEDULE = [
-    (0,    {"z_map": 1.0}),                                   
+    (0,    {"open": 1.0}),                                   
     (8000, {"open": 0.4, "star_map": 0.6}),                     
     # (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
     # (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
@@ -135,6 +135,7 @@ def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: in
     return float(np.mean(rewards))
 
 def parse_args():
+    
     parser = argparse.ArgumentParser(description="MADDPG + MAGIC Scheduler + CoDe Delay-aware Fusion for multi-robot formation control")
 
     # =========================================================
@@ -197,7 +198,7 @@ def parse_args():
     # =========================================================
     parser.add_argument("--intent_dim", type=int, default=32, help="意图向量 e_t 的维度。")
     parser.add_argument("--decoder_hidden_dim", type=int, default=64, help="发送端 Intent Decoder 中 GRU 解码器的隐藏状态维度。")
-    parser.add_argument("--pred_horizon", type=int, default=4, help="发送端 decoder 预测未来动作的时间跨度 K。")
+    parser.add_argument("--pred_horizon", type=int, default=5, help="发送端 decoder 预测未来动作的时间跨度 K。")
 
     # =========================================================
     # 七、CoDe：接收端双对齐融合参数
@@ -252,8 +253,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    # resume_checkpoint = None  
-    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_06c218_2026-04-17_22-57-33/latest_checkpoint" 
+    resume_checkpoint = None  
+    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_06c218_2026-04-17_22-57-33/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
