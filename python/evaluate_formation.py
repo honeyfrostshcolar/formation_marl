@@ -20,7 +20,7 @@ def parse_args():
     # [新增] 评估专属参数
     # =========================================================
     parser.add_argument("--model_dir", type=str, 
-                        default="/home/nankai/formation_test/data/MADDPG_Formation_c11fe1_2026-04-14_10-15-30/latest_checkpoint",
+                        default="/home/nankai/formation_test/data/MADDPG_Formation_d3489b_2026-04-17_15-26-12/latest_checkpoint",
                         help="要评估的模型文件夹路径 (包含 maddpg_checkpoint.pt 的目录)。")
     
     parser.add_argument("--eval_episodes", type=int, default=10, help="评估多少局。")
@@ -110,7 +110,7 @@ def parse_args():
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
     args.action_dim = 2
-    args.obs_size = 55 # ✅ 必须改为 35，适配最新加入的 formation_alpha 指令！
+    args.obs_size = 58 # ✅ 必须改为 35，适配最新加入的 formation_alpha 指令！
 
     return args
 

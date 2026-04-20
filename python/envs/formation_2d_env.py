@@ -54,12 +54,17 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.sensing_radius = config.get("sensing_radius", 5.0)  # 最大感知半径 (米)
         self.max_visible_teammates = 3  # 网络最多只管最近的 3 个兄弟
         
-        self.reward_fn = MADDPGFormationReward()
+        self.safety_threshold = 0.5
+        self.target_distance = 1.0
+        self.max_distance = 4.0
+        self.reward_fn = MADDPGFormationReward(self.safety_threshold, self.target_distance, self.max_distance)
         
         self.leader_velocity = [0.0, 0.1]  
+        self.leader_yaw = 0.0
         self.leader_pos = np.array([0.0, 0.0], dtype=np.float32)
+
         self.follower_pos = np.random.uniform(-1, 1, size=(self.num_followers, 2)).astype(np.float32)
-        self.follower_yaw = np.zeros(self.num_followers, dtype=np.float32)
+        self.follower_yaw = np.full(self.num_followers, self.leader_yaw, dtype=np.float32)
 
         # ==========================================
         # ✅ 4. 彻底重构动作与状态空间 (针对单个智能体)
@@ -281,82 +286,28 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.prev_leader_yaw = old_leader_yaw
 
         # ==========================================
-        # 2. 跟随者根据动作字典各自移动
+        # 2. 跟随者根据动作生成下一个路点 (纯路径规划)
         # ==========================================
-        cos_yaw = np.cos(self.leader_yaw)
-        sin_yaw = np.sin(self.leader_yaw)
-        
-        dt = 0.1
-        max_v = 0.6     # 先保守一点，别太快
-        max_w = 1.2     # 最大角速度
-        k_v = 1.0       # 线速度比例
-        k_w = 2.0       # 角速度比例
-
-        self.virtual_targets = np.zeros_like(self.follower_pos)
-
         for i, agent_id in enumerate(self._agent_ids):
             if agent_id not in action_dict:
                 continue
+                
+            ax, ay = action_dict[agent_id] 
+            max_step_dist = 0.2 
+            
+            my_yaw = self.follower_yaw[i] # 获取小弟自己的朝向
 
-            # =========================
-            # 1) 高层动作 -> leader局部槽位
-            # =========================
-            x_back = self.num_followers * 0.9 + 0.5
-            y_span = 2.0
-            ax, ay = action_dict[agent_id]
+            # 把局部的 ax(前后), ay(左右) 旋转为全局的 dx, dy
+            dx = (ax * np.cos(my_yaw) - ay * np.sin(my_yaw)) * max_step_dist
+            dy = (ax * np.sin(my_yaw) + ay * np.cos(my_yaw)) * max_step_dist
+            
+            new_pos = self.follower_pos[i] + np.array([dx, dy], dtype=np.float32)
 
-            local_x = -(ax + 1.0) / 2.0 * x_back
-            local_y = ay * y_span
-            local_action = np.array([local_x, local_y], dtype=np.float32)
-
-            # leader局部 -> 全局
-            global_dx = local_action[0] * cos_yaw - local_action[1] * sin_yaw
-            global_dy = local_action[0] * sin_yaw + local_action[1] * cos_yaw
-
-            virtual_target = self.leader_pos + np.array([global_dx, global_dy], dtype=np.float32)
-            self.virtual_targets[i] = virtual_target
-
-            # =========================
-            # 2) 底层跟踪器：平滑追踪虚拟目标
-            # =========================
-            current_pos = self.follower_pos[i]
-            current_yaw = self.follower_yaw[i]
-
-            move_vec = virtual_target - current_pos
-            dist = np.linalg.norm(move_vec)
-
-            if dist < 1e-6:
-                continue
-
-            target_yaw = np.arctan2(move_vec[1], move_vec[0])
-            yaw_err = (target_yaw - current_yaw + np.pi) % (2 * np.pi) - np.pi
-
-            # 角速度控制
-            w_cmd = np.clip(k_w * yaw_err, -max_w, max_w)
-
-            # 如果朝向差太大，先转向，少前进
-            forward_scale = max(0.0, np.cos(yaw_err))
-            v_cmd = np.clip(k_v * dist * forward_scale, 0.0, max_v)
-
-            # 先更新朝向
-            new_yaw = current_yaw + w_cmd * dt
-            new_yaw = (new_yaw + np.pi) % (2 * np.pi) - np.pi
-
-            # 再根据新朝向走一步
-            step_move = np.array([np.cos(new_yaw), np.sin(new_yaw)], dtype=np.float32) * v_cmd * dt
-            candidate_pos = current_pos + step_move
-
-            # =========================
-            # 3) 最简单安全检查：如果下一步进膨胀障碍区，就刹车
-            # =========================
-            px, py = self._world_to_grid(candidate_pos[0], candidate_pos[1])
-            if 0 <= px < self.inflated_map_grid.shape[1] and 0 <= py < self.inflated_map_grid.shape[0]:
-                if not self.inflated_map_grid[py, px]:
-                    self.follower_pos[i] = candidate_pos
-                # 否则位置不更新，相当于刹车
-            # 越界也不更新，相当于刹车
-
-            self.follower_yaw[i] = new_yaw
+            # 只有当移动距离足够大时，才更新朝向，防止原地抖动导致朝向乱转
+            if np.linalg.norm([dx, dy]) > 0.001:
+                self.follower_yaw[i] = np.arctan2(dy, dx)
+                
+            self.follower_pos[i] = new_pos
 
         self.step_count += 1
         is_timeout = self.step_count >= self.max_steps # 超时结束
@@ -451,9 +402,9 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
     def _get_single_follower_obs(self, follower_idx):
         my_pos = self.follower_pos[follower_idx]
+        my_yaw = self.follower_yaw[follower_idx] 
 
-        # 1. 算雷达 (保持不变)
-        my_yaw = self.follower_yaw[follower_idx]
+        # 算雷达 (传入自己的朝向)
         lidar_data = self._simulate_radar(my_pos, my_yaw)
         
         ranges = np.array(lidar_data.ranges)
@@ -478,8 +429,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         lidar_obs = np.concatenate([core_features, downsampled_lidar])
         # lidar_obs = np.round(lidar_obs, 2)
 
-        # 坐标转换函数：将全局向量转为老大的局部坐标系
-        cos_y, sin_y = np.cos(self.leader_yaw), np.sin(self.leader_yaw)
+        cos_y, sin_y = np.cos(my_yaw), np.sin(my_yaw) 
         def global_to_local(vec):
             return np.array([
                 vec[0] * cos_y + vec[1] * sin_y,
@@ -528,11 +478,14 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         formation_alpha = self.reward_fn.compute_formation_alpha(corridor_width)
         formation_alpha_obs = np.array([formation_alpha], dtype=np.float32)
 
-        leader_yaw_rate_norm = self.leader_yaw_rate / 0.15  # 因为 step() 里最大转角变化被 clip 到 ±0.15
+        rel_yaw = (self.leader_yaw - my_yaw + np.pi) % (2 * np.pi) - np.pi
+
+        leader_yaw_rate_norm = self.leader_yaw_rate / 0.15  
+        # 告诉网络：老大的车头相对我的车头偏了多少度
         leader_heading_obs = np.array(
             [
-                np.cos(self.leader_yaw),
-                np.sin(self.leader_yaw),
+                np.cos(rel_yaw),
+                np.sin(rel_yaw),
                 leader_yaw_rate_norm,
             ],
             dtype=np.float32,
@@ -549,17 +502,18 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         return obs
 
-    def _simulate_radar(self, origin_pos, my_yaw):
-        num_rays = self.radar_rays # 180
+    def _simulate_radar(self, origin_pos, current_yaw): 
+        num_rays = self.radar_rays 
         max_distance = 10.0
-        step_size = self.map_resolution # 0.1
+        step_size = self.map_resolution 
         
         lidar_data = formation_core.LidarData(num_rays, max_distance)
         angle_list = []
         range_list = []
         
         for i in range(num_rays):
-            angle = my_yaw + (2 * np.pi * i / num_rays)
+            # 雷达朝向使用传入的角，不再用 leader_yaw
+            angle = current_yaw + (2 * np.pi * i / num_rays)
             angle_list.append(angle)
             
             dx = np.cos(angle)
@@ -621,10 +575,16 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         for pos in self.follower_pos:
             self.ax.plot(pos[0], pos[1], 'bo', markersize=8)
             
-        # TODO: 由于环境不再直接接收控制图了，我们暂时画星型图，等 G2ANet 引入后再动态画线
-        for pos in self.follower_pos:
-            self.ax.plot([self.leader_pos[0], pos[0]],
-                        [self.leader_pos[1], pos[1]], 'k-', alpha=0.5, linewidth=1.5)
+        # 画小弟及其独立的朝向
+        for i, pos in enumerate(self.follower_pos):
+            self.ax.plot(pos[0], pos[1], 'bo', markersize=8)
+            
+            # 给小弟加个短一点的方向箭头 (蓝色)
+            follower_arrow_len = 0.5
+            f_dx = follower_arrow_len * np.cos(self.follower_yaw[i])
+            f_dy = follower_arrow_len * np.sin(self.follower_yaw[i])
+            self.ax.arrow(pos[0], pos[1], f_dx, f_dy,
+                        head_width=0.2, head_length=0.3, fc='b', ec='b', alpha=0.8)
 
         self.ax.grid(True, linestyle='--', alpha=0.3)
         self.ax.set_title(f'MARL Formation 2D Env | Step: {self.step_count}')

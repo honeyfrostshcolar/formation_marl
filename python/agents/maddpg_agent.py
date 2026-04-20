@@ -162,6 +162,32 @@ class MADDPG_Agent:
                 mu=mu_curr.reshape(bn, -1),
                 logvar=logvar_curr.reshape(bn, -1),
             )
+
+            # --------------------
+            # 4) Belief 推理 Loss
+            # --------------------
+            obs_curr = seq["obs_decode"][:, :, 0, :] 
+            lidar_curr = obs_curr[..., :41]
+            leader_rel_curr = obs_curr[..., 41:43]
+            leader_heading_curr = obs_curr[..., -3:]
+
+            b_mu, b_logvar, belief_z, _ = self.actor.leader_belief_encoder(
+                seq["h_curr"], lidar_curr, leader_rel_curr, leader_heading_curr
+            )
+            
+            # 预测老大未来 K 步轨迹
+            pred_leader_future = self.actor.leader_belief_decoder(belief_z.reshape(bn, -1), seq["h_curr"].reshape(bn, -1))
+            
+            # 从未来 K 步的 obs_decode 里，直接切片拿到真实的 leader_rel (第 41~42 维)！
+            target_leader_future = seq["obs_decode"][:, :, :, 41:43].reshape(bn, self.args.pred_horizon, 2)
+            
+            # 算 MSE 和 KL 损失
+            loss_belief_mse = F.mse_loss(pred_leader_future, target_leader_future)
+            # 复用 utils 里的 KL 损失函数
+            from utils.code_losses import kl_intent_loss
+            loss_belief_kl = kl_intent_loss(b_mu.reshape(bn, -1), b_logvar.reshape(bn, -1))
+            
+            L_belief = loss_belief_mse + 1e-3 * loss_belief_kl
         else:
             zero = actor_rl_loss.new_zeros(())
             intent_loss_dict = {
@@ -171,7 +197,7 @@ class MADDPG_Agent:
                 "L_int": zero,
             }
 
-        total_losses = total_training_loss(actor_rl_loss, intent_loss_dict, aux["L_e"])
+        total_losses = total_training_loss(actor_rl_loss, intent_loss_dict, L_belief, aux["L_e"]) #L_e:逼迫调度器保持一定的不确定性，鼓励它去探索不同的通信连线组合
 
         self.actor_optimizer.zero_grad()
         total_losses["L_total"].backward()
@@ -194,5 +220,6 @@ class MADDPG_Agent:
             "L_c": float(total_losses["L_c"].item()),
             "L_k": float(total_losses["L_k"].item()),
             "L_e": float(total_losses["L_e"].item()),
+            "L_b": float(total_losses["L_b"].item()),
         }
         return metrics

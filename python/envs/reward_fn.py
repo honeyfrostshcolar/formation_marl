@@ -27,7 +27,7 @@ class MADDPGFormationReward:
         self.w_danger = 2.0      # 危险区：撞墙/进入障碍物膨胀层的重罚权重 (保命)
         self.w_jitter = 1.0      # 平滑度：过度抖动/能量损耗的惩罚权重
         self.w_direction = 1.0   # 方向感：保持在老大后方的得分权重
-        self.w_geometry = 0.1    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
+        self.w_geometry = 2.0    # 几何形状：鼓励形成良好的队形奖励权重 (新加的)
 
     def compute_formation_alpha(self, corridor_width: float) -> float:
         """

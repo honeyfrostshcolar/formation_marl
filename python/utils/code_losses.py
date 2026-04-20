@@ -77,6 +77,7 @@ def total_intent_loss(
 def total_training_loss(
     rl_loss: torch.Tensor,
     intent_loss_dict: Dict[str, torch.Tensor],
+    belief_loss: torch.Tensor,
     alignment_loss: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
     """总损失。
@@ -85,7 +86,8 @@ def total_training_loss(
     """
     L_int = intent_loss_dict["L_int"]
     L_e = alignment_loss
-    L_total = rl_loss + L_int + L_e
+    L_b = belief_loss
+    L_total = rl_loss + L_int + L_e + L_b
 
     return {
         "L_rl": rl_loss,
@@ -94,5 +96,6 @@ def total_training_loss(
         "L_k": intent_loss_dict["L_k"],
         "L_int": L_int,
         "L_e": L_e,
+        "L_b": L_b,
         "L_total": L_total,
     }

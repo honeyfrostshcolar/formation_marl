@@ -44,8 +44,8 @@ def load_checkpoint(agent, path):
     return 0
 
 CURRICULUM_SCHEDULE = [
-    (0,    {"star_map": 1.0}),                                   
-    (5000, {"open": 0.4, "star_map": 0.6}),                     
+    (0,    {"z_map": 1.0}),                                   
+    (8000, {"open": 0.4, "star_map": 0.6}),                     
     # (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
     # (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
     # (4000, {"open": 0.2, "star_map": 0.3, "z_map": 0.5}),                     
@@ -252,8 +252,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_c11fe1_2026-04-14_10-15-30/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_06c218_2026-04-17_22-57-33/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -405,7 +405,8 @@ def main():
         if (episode + 1) % args.eval_every == 0:
             
             # 定义期末考试科目（你可以把想考的地图都写上）
-            eval_maps = ["open", "z_map", "star_map", "custom"]
+            # eval_maps = ["open", "z_map", "star_map", "custom"]
+            eval_maps = ["open"]
             scores = {}
             
             print(f"📊 Eval @ episode {episode+1}: ", end="")

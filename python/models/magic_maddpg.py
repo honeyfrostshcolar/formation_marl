@@ -9,6 +9,7 @@ from models.intent_decoder import IntentDecoder
 from models.fusion_net import DualAlignmentFusion
 from models.runtime_delay_buffer import RuntimeDelayBuffer
 from utils.comm_utils import ensure_action_tensor
+from models.leader_belief import LeaderBeliefDecoder, LeaderBeliefEncoder
 
 class MAGICCoDeActor(nn.Module):
     """重构 Actor。
@@ -51,24 +52,30 @@ class MAGICCoDeActor(nn.Module):
         self.intent_encoder = IntentEncoder(args) # 意图编码器
         self.intent_decoder = IntentDecoder(args) # 意图解码器
 
+        self.belief_dim = 32
+        self.leader_belief_encoder = LeaderBeliefEncoder(args.hid_size, lidar_dim=41, belief_dim=self.belief_dim)
+        self.leader_belief_decoder = LeaderBeliefDecoder(args.hid_size, pred_horizon=args.pred_horizon, belief_dim=self.belief_dim)
+
         # 接收方
         self.message_fusion = DualAlignmentFusion(args) # 消息融合器
 
         # self.init_hidden(args.batch_size)
         self.lstm_cell= nn.LSTMCell(args.hid_size, args.hid_size)
 
+        sched_in_dim = args.hid_size + 1
+
         # initialize mlp layers for the sub-schedulers
         if not args.first_graph_complete:
             if args.use_gat_encoder:
                 self.sub_scheduler_mlp1 = nn.Sequential(
-                    nn.Linear(args.gat_encoder_out_size*2, args.gat_encoder_out_size//2),
+                    nn.Linear((args.gat_encoder_out_size + 1)*2, args.gat_encoder_out_size//2),
                     nn.ReLU(),
                     nn.Linear(args.gat_encoder_out_size//2, args.gat_encoder_out_size//2),
                     nn.ReLU(),
                     nn.Linear(args.gat_encoder_out_size//2, 2))
             else:
                 self.sub_scheduler_mlp1 = nn.Sequential(
-                    nn.Linear(self.hid_size*2, self.hid_size//2),
+                    nn.Linear(sched_in_dim*2, self.hid_size//2),
                     nn.ReLU(),
                     nn.Linear(self.hid_size//2, self.hid_size//8),
                     nn.ReLU(),
@@ -77,14 +84,14 @@ class MAGICCoDeActor(nn.Module):
         if args.learn_second_graph and not args.second_graph_complete:
             if args.use_gat_encoder:
                 self.sub_scheduler_mlp2 = nn.Sequential(
-                    nn.Linear(args.gat_encoder_out_size*2, args.gat_encoder_out_size//2),
+                    nn.Linear((args.gat_encoder_out_size + 1)*2, args.gat_encoder_out_size//2),
                     nn.ReLU(),
                     nn.Linear(args.gat_encoder_out_size//2, args.gat_encoder_out_size//2),
                     nn.ReLU(),
                     nn.Linear(args.gat_encoder_out_size//2, 2))
             else:
                 self.sub_scheduler_mlp2 = nn.Sequential(
-                    nn.Linear(self.hid_size*2, self.hid_size//2),
+                    nn.Linear(sched_in_dim*2, self.hid_size//2),
                     nn.ReLU(),
                     nn.Linear(self.hid_size//2, self.hid_size//8),
                     nn.ReLU(),
@@ -110,7 +117,8 @@ class MAGICCoDeActor(nn.Module):
                    
         # initialize the action head (in practice, one action head is used)
         # policy head 输入维度改为 h + intent + fused
-        policy_in_dim = args.hid_size + args.intent_dim + args.value_dim
+        policy_in_dim = args.hid_size + args.intent_dim + args.value_dim + self.belief_dim
+
         self.action_head = nn.Sequential(
             nn.Linear(policy_in_dim, args.hid_size),
             nn.ReLU(),
@@ -180,18 +188,21 @@ class MAGICCoDeActor(nn.Module):
         soft = soft * mask * (1.0 - eye)
         return hard, soft
 
-    def build_route_graph(self, sender_hidden: torch.Tensor, agent_mask: torch.Tensor):
+    def build_route_graph(self, sender_hidden: torch.Tensor, agent_mask: torch.Tensor, belief_entropy: torch.Tensor):
 
         """
         通过一步或两步调度器构建路由图，用于确定智能体之间的通信拓扑。
         """
 
         feat1 = self._scheduler_features(sender_hidden, agent_mask)
-        adj1_hard, adj1_soft = self.sub_scheduler(self.sub_scheduler_mlp1, feat1, agent_mask, self.args.directed)
+        sched_input1 = torch.cat([feat1, belief_entropy], dim=-1)
+      
+        adj1_hard, adj1_soft = self.sub_scheduler(self.sub_scheduler_mlp1, sched_input1, agent_mask, self.args.directed)
 
         if self.args.learn_second_graph:
             feat2 = self._scheduler_features(sender_hidden, agent_mask)
-            adj2_hard, adj2_soft = self.sub_scheduler(self.sub_scheduler_mlp2, feat2, agent_mask, self.args.directed)
+            sched_input2 = torch.cat([feat2, belief_entropy], dim=-1)
+            adj2_hard, adj2_soft = self.sub_scheduler(self.sub_scheduler_mlp2, sched_input2, agent_mask, self.args.directed)
             # [MOD 6-4] 两轮 scheduler 现在做“粗筛 + 细筛”，最终路由为逐元素相乘
             final_hard = adj1_hard * adj2_hard
             final_soft = adj1_soft * adj2_soft
@@ -318,6 +329,17 @@ class MAGICCoDeActor(nn.Module):
         h_out = h_out.reshape(b, n, self.hid_size)
         c_out = c_out.reshape(b, n, self.hid_size)
 
+        lidar_obs = obs[..., :41]                   # 雷达数据 (看墙)
+        leader_rel = obs[..., 41:43]                # 老大相对坐标 (看老大的位置)
+        leader_heading = obs[..., -3:]              # 老大航向差与角速度 (看老大的扭动姿态)
+
+        b_mu, b_logvar, belief_z, belief_entropy = self.leader_belief_encoder(
+            h_out,           # 记忆上下文
+            lidar_obs,       # 戴上眼镜看墙
+            leader_rel,      # 戴上眼镜看老大当前坐标
+            leader_heading   # 戴上眼镜看老大当前车头朝向
+        )
+
         if runtime_mode:
             prev_action = ensure_action_tensor(self.runtime_prev_action, b, n, self.action_dim, device, dtype)
         else:
@@ -332,7 +354,7 @@ class MAGICCoDeActor(nn.Module):
             sender_hidden = self.message_encoder(sender_hidden)
         sender_hidden = sender_hidden * agent_mask
 
-        route_hard, route_soft = self.build_route_graph(h_out, agent_mask)
+        route_hard, route_soft = self.build_route_graph(h_out, agent_mask, belief_entropy)
 
         # ==========================================
         # 接收端输入：执行硬、训练软
@@ -427,7 +449,8 @@ class MAGICCoDeActor(nn.Module):
         if self.message_decoder is not None:
             fused_msg = self.message_decoder(fused_msg)
 
-        policy_feat = torch.cat([h_out, intents, fused_msg], dim=-1)
+        policy_feat = torch.cat([h_out, intents, fused_msg, belief_z], dim=-1)
+        
         actions_out = self.action_head(policy_feat)
 
         if runtime_mode:
