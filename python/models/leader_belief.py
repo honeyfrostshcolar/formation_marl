@@ -72,5 +72,6 @@ class LeaderBeliefDecoder(nn.Module):
     def forward(self, belief_z, h_t):
         x = torch.cat([belief_z, h_t], dim=-1)
         preds = self.mlp(x) # [B, N, K * 2]
-        b, n, _ = preds.shape
-        return preds.reshape(b, n, self.pred_horizon, 2)
+        new_shape = (*preds.shape[:-1], self.pred_horizon, 2)
+        
+        return preds.reshape(new_shape)

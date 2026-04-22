@@ -168,6 +168,93 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         if 0 <= px < width and 0 <= py < height:
             return self.map_grid[py, px]
         return True
+    
+    def get_communication_mask(self, positions, max_dist=10.0, drop_rate=0.1):
+        """
+        计算物理通信的 Mask 矩阵 (N x N)
+        专门针对 follower 之间的通信网络。
+        """
+        num_agents = len(positions)
+        mask = np.ones((num_agents, num_agents), dtype=np.float32)
+
+        for i in range(num_agents):
+            for j in range(num_agents):
+                if i == j:
+                    continue  # 自己和自己通信全通
+
+                # -----------------------------------
+                # 1. 距离衰减 (Distance-based Loss)
+                # -----------------------------------
+                dist = np.linalg.norm(positions[i] - positions[j])
+                if dist > max_dist:
+                    mask[i, j] = 0.0
+                    continue
+
+                # -----------------------------------
+                # 2. 随机丢包 (Stochastic Packet Drop)
+                # -----------------------------------
+                if np.random.rand() < drop_rate:
+                    mask[i, j] = 0.0
+                    continue
+
+                # -----------------------------------
+                # 3. 视距遮挡 (Line-of-Sight Blockage)
+                # -----------------------------------
+                # 传入两辆车的坐标，检查是否被墙遮挡
+                if self._check_los_blockage(positions[i], positions[j]):
+                    mask[i, j] = 0.0
+
+        return mask
+    
+    def _check_los_blockage(self, pos1, pos2):
+        """
+        使用 Bresenham 算法检查两个连续坐标之间是否有障碍物遮挡
+        """
+        # ✅ 直接调用你环境里现成的坐标转换函数！
+        x0, y0 = self._world_to_grid(pos1[0], pos1[1])
+        x1, y1 = self._world_to_grid(pos2[0], pos2[1])
+
+        # 射线追踪算法
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        x, y = x0, y0
+        sx = -1 if x0 > x1 else 1
+        sy = -1 if y0 > y1 else 1
+        
+        # 使用你环境里最精准的未膨胀地图作为遮挡判定标准
+        grid = self.map_grid 
+        height, width = grid.shape
+        
+        if dx > dy:
+            err = dx / 2.0
+            while x != x1:
+                # 边界保护
+                if 0 <= y < height and 0 <= x < width:
+                    if grid[y, x]:  # True 代表这里是障碍物（墙），信号中断！
+                        return True 
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy / 2.0
+            while y != y1:
+                if 0 <= y < height and 0 <= x < width:
+                    if grid[y, x]:  
+                        return True
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+                
+        # 检查终点
+        if 0 <= y < height and 0 <= x < width:
+            if grid[y, x]:
+                return True
+            
+        return False
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -392,6 +479,19 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         terminated_dict["__all__"] = episode_done
         truncated_dict["__all__"] = is_timeout
+
+        # ✅ 物理断网模拟：提取所有小弟的当前坐标，计算 N x N 的通信可用矩阵
+        # 设置最大通信距离为 8.0 米，基础丢包率为 10%
+        physical_comm_mask = self.get_communication_mask(
+            self.follower_pos, 
+            max_dist=8.0, 
+            drop_rate=0.1
+        )
+
+        # 把物理网络状态存入 info_dict，让主训练循环能拿到
+        for i, agent_id in enumerate(self._agent_ids): 
+            # 你可以把它塞进 __all__ 里，或者直接让第一个 agent 携带
+            info_dict[agent_id]["physical_comm_mask"] = physical_comm_mask
 
         self.prev_follower_pos = self.follower_pos.copy()
 

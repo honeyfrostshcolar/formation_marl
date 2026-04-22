@@ -110,6 +110,7 @@ class MADDPG_Agent:
         # --------------------
         external_comm = {
             "time_lags": batch["time_lags"],
+            "recv_mask": batch["recv_mask"],
         }
         curr_actions, _, _, _, aux = self.actor(
             batch["obs"],
@@ -196,6 +197,7 @@ class MADDPG_Agent:
                 "L_k": zero,
                 "L_int": zero,
             }
+            L_belief = zero
 
         total_losses = total_training_loss(actor_rl_loss, intent_loss_dict, L_belief, aux["L_e"]) #L_e:逼迫调度器保持一定的不确定性，鼓励它去探索不同的通信连线组合
 

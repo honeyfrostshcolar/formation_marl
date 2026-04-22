@@ -394,11 +394,7 @@ class MAGICCoDeActor(nn.Module):
                 intents, sender_hidden
             )
 
-            # available_mask = external_comm["recv_mask"]   # 这是硬可用性，不参与学习
-
-            # 假装物理信道全通，把切断信道的生杀大权完全交给下面的 route_gate！
-            eye_mask = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
-            available_mask = (1.0 - eye_mask).expand(b, n, n).clone()
+            available_mask = external_comm["recv_mask"]   
 
             time_lags = external_comm["time_lags"]
 
@@ -409,7 +405,9 @@ class MAGICCoDeActor(nn.Module):
             # 方案 2：STE 门控（推荐）
             route_gate_soft = route_soft.transpose(1, 2).contiguous()
             route_gate_hard = route_hard.transpose(1, 2).contiguous()
-            route_gate = route_gate_hard.detach() - route_gate_soft.detach() + route_gate_soft
+            route_gate_ste = route_gate_hard.detach() - route_gate_soft.detach() + route_gate_soft
+
+            route_gate = available_mask * route_gate_ste
 
             online_delay = time_lags.transpose(1, 2).contiguous()
 
@@ -500,3 +498,4 @@ class Centralized_Critic(nn.Module):
         x = F.relu(self.fc2(x))
         q_value = self.fc3(x)
         return q_value
+    

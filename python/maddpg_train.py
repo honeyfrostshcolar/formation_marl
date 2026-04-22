@@ -44,7 +44,7 @@ def load_checkpoint(agent, path):
     return 0
 
 CURRICULUM_SCHEDULE = [
-    (0,    {"open": 1.0}),                                   
+    (0,    {"z_map": 1.0}),                                   
     (8000, {"open": 0.4, "star_map": 0.6}),                     
     # (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
     # (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
@@ -253,8 +253,8 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_06c218_2026-04-17_22-57-33/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_366a4f_2026-04-21_09-55-48/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -343,7 +343,7 @@ def main():
             graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
             graphs_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
 
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict = env.step(
                 action_dict,
                 graph_dict,
                 graphs_soft_dict,
@@ -352,6 +352,10 @@ def main():
 
             team_reward = reward_dict[env._agent_ids[0]]
             team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
+
+            first_follower_id = env._agent_ids[0] #每个智能体的mask都是一样的，包含了N*N的图
+            if first_follower_id in info_dict and "physical_comm_mask" in info_dict[first_follower_id]:
+                comm_snapshot["recv_mask"] = info_dict[first_follower_id]["physical_comm_mask"]
 
             buffer.store({
                 "obs": obs_array,
