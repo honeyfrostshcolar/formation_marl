@@ -340,6 +340,12 @@ class MAGICCoDeActor(nn.Module):
             leader_heading   # 戴上眼镜看老大当前车头朝向
         )
 
+        if getattr(self.args, 'no_belief', False):
+            # 将输出信息强行置为全零，形状保持不变，避免维度报错
+            # print("no_belief")
+            belief_z = torch.zeros_like(belief_z)
+            belief_entropy = torch.zeros_like(belief_entropy)
+
         if runtime_mode:
             prev_action = ensure_action_tensor(self.runtime_prev_action, b, n, self.action_dim, device, dtype)
         else:

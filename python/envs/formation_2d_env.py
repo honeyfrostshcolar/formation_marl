@@ -33,7 +33,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         self.map_resolution = 0.1
         self.map_origin = np.array([0.0, 0.0])
 
-        self.available_map_modes = ["open", "z_map", "star_map", "custom"]
+        self.available_map_modes = ["open", "star_map", "hybrid", "z_map", "custom"]
 
         self.custom_map_path = config.get(
             "custom_map_path",
@@ -46,6 +46,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             "open": self._generate_open_map,
             "z_map": self._generate_z_map,
             "star_map": self._generate_star_map,
+            "hybrid": self._generate_hybrid_map,
             "custom": lambda: self._load_custom_map(self.custom_map_path), 
         }
 
@@ -155,6 +156,24 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 grid[y-4:y+5, x-4:x+5] = True
         return grid
     
+    def _generate_hybrid_map(self):
+        grid = np.zeros((200, 200), dtype=bool)
+
+        # 边界墙
+        grid[0:5, :] = True
+        grid[-5:, :] = True
+        grid[:, 0:5] = True
+        grid[:, -5:] = True
+
+        # 右半边放规则柱阵
+        x_coords = np.linspace(120, 170, 3, dtype=int)   # 右侧三列柱子
+        y_coords = np.linspace(35, 165, 4, dtype=int)    # 四行柱子
+        for x in x_coords:
+            for y in y_coords:
+                grid[y-4:y+5, x-4:x+5] = True
+
+        return grid
+    
 
     def _world_to_grid(self, x, y):
         height, width = self.map_grid.shape
@@ -255,6 +274,43 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 return True
             
         return False
+    
+    def _compute_mean_formation_error(self):
+        forward_vec = np.array([np.cos(self.leader_yaw), np.sin(self.leader_yaw)])
+        left_vec = np.array([-forward_vec[1], forward_vec[0]])
+
+        # 和 reward_fn 保持一致
+        leader_lidar = self._simulate_radar(self.leader_pos, self.leader_yaw)
+        feature_extractor = formation_core.FeatureExtractor(8)
+        leader_features = feature_extractor.extract_features(leader_lidar)
+        corridor_width = leader_features.corridor_width
+        alpha = self.reward_fn.compute_formation_alpha(corridor_width)
+
+        v_angle = np.pi / 4
+        line_spacing = 0.9
+
+        errs = []
+        for i, pos in enumerate(self.follower_pos):
+            global_i = i + 1
+            rel_pos = pos - self.leader_pos
+            local_x = np.dot(rel_pos, forward_vec)
+            local_y = np.dot(rel_pos, left_vec)
+
+            line_x = - global_i * line_spacing
+            line_y = 0.0
+
+            row = (global_i + 1) // 2
+            side_multiplier = 1.0 if global_i % 2 != 0 else -1.0
+            v_x = - row * self.reward_fn.target_distance * np.cos(v_angle)
+            v_y = side_multiplier * row * self.reward_fn.target_distance * np.sin(v_angle)
+
+            target_local_x = (1.0 - alpha) * line_x + alpha * v_x
+            target_local_y = (1.0 - alpha) * line_y + alpha * v_y
+
+            err = np.sqrt((local_x - target_local_x) ** 2 + (local_y - target_local_y) ** 2)
+            errs.append(err)
+
+        return float(np.mean(errs)) if errs else 0.0
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -380,6 +436,8 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
                 continue
                 
             ax, ay = action_dict[agent_id] 
+            ax = (ax + 1) / 2.0
+
             max_step_dist = 0.2 
             
             my_yaw = self.follower_yaw[i] # 获取小弟自己的朝向
@@ -392,7 +450,18 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
             # 只有当移动距离足够大时，才更新朝向，防止原地抖动导致朝向乱转
             if np.linalg.norm([dx, dy]) > 0.001:
-                self.follower_yaw[i] = np.arctan2(dy, dx)
+               
+                target_yaw = np.arctan2(dy, dx)
+                
+                # 模拟底盘旋转的物理惯性 (限制单步最大转角，比如和 leader 保持一致的 0.15 弧度)
+                yaw_diff = (target_yaw - my_yaw + np.pi) % (2 * np.pi) - np.pi
+                max_yaw_rate = 0.15 
+                
+                # 平滑滤波：限制每步能扭动的最大角度
+                self.follower_yaw[i] = my_yaw + np.clip(yaw_diff, -max_yaw_rate, max_yaw_rate)
+                
+                # 规范化到 [-pi, pi]
+                self.follower_yaw[i] = (self.follower_yaw[i] + np.pi) % (2 * np.pi) - np.pi
                 
             self.follower_pos[i] = new_pos
 
@@ -445,6 +514,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             follower_positions=self.follower_pos,
             prev_follower_positions=self.prev_follower_pos,
             leader_yaw=self.leader_yaw,
+            follower_yaw=self.follower_yaw,
             in_danger_zone=in_danger_zone, # 传入每个智能体是否在危险区的信息(指的是inflated_map_grid)
             in_crash_zone=in_crash_zone, # 传入每个智能体是否在撞击区的信息(指的是map_grid)
             dynamic_connections=dynamic_connections, # 传入动态图！
@@ -475,7 +545,17 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
             reward_dict[agent_id] = team_reward 
             terminated_dict[agent_id] = episode_done
             truncated_dict[agent_id] = is_timeout
-            info_dict[agent_id] = reward_details # 把扣分明细传出去，方便你写日志
+            
+            info_payload = dict(reward_details)
+            info_payload["leader_done"] = bool(leader_done)
+            info_payload["any_follower_crashed"] = bool(any_follower_crashed)
+            info_payload["timeout"] = bool(is_timeout)
+            info_payload["success"] = bool(leader_done and not any_follower_crashed)
+            info_payload["collision"] = bool(any_follower_crashed)
+            info_payload["episode_done"] = bool(episode_done)
+            info_payload["formation_error"] = float(self._compute_mean_formation_error())
+
+            info_dict[agent_id] = info_payload
 
         terminated_dict["__all__"] = episode_done
         truncated_dict["__all__"] = is_timeout

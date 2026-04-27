@@ -189,6 +189,10 @@ class MADDPG_Agent:
             loss_belief_kl = kl_intent_loss(b_mu.reshape(bn, -1), b_logvar.reshape(bn, -1))
             
             L_belief = loss_belief_mse + 1e-3 * loss_belief_kl
+
+            if getattr(self.args, 'no_belief', False):
+                L_belief = L_belief.new_zeros(())
+                
         else:
             zero = actor_rl_loss.new_zeros(())
             intent_loss_dict = {

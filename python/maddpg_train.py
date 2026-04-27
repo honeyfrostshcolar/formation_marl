@@ -44,8 +44,8 @@ def load_checkpoint(agent, path):
     return 0
 
 CURRICULUM_SCHEDULE = [
-    (0,    {"z_map": 1.0}),                                   
-    (8000, {"open": 0.4, "star_map": 0.6}),                     
+    (0,    {"star_map": 1.0}),                                   
+    (10000, {"open": 0.4, "star_map": 0.6}),                     
     # (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
     # (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
     # (4000, {"open": 0.2, "star_map": 0.3, "z_map": 0.5}),                     
@@ -57,6 +57,7 @@ MAP_SEED_BASE = {
     "z_map": 2000,
     "star_map": 3000,
     "custom": 4000,
+    "hybrid": 3500,
 }
 
 def choose_map_mode(episode: int) -> str:
@@ -77,11 +78,12 @@ def choose_map_mode(episode: int) -> str:
 
 
 @torch.no_grad()
-def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: int) -> float:
-    """
-    在指定地图上跑若干局，返回平均 episode reward。
-    """
+def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: int):
     rewards = []
+    successes = []
+    collisions = []
+    lengths = []
+    formation_errors = []
 
     rng_state = np.random.get_state()
 
@@ -96,23 +98,19 @@ def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: in
         agent.reset_runtime()
 
         episode_reward = 0.0
+        last_info = None
 
         for step in range(max_steps):
             action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
-                obs_array,
-                h_in,
-                c_in,
-                add_noise=False,
+                obs_array, h_in, c_in, add_noise=False,
             )
 
-            action_dict = {env._agent_ids[i]: action_exec[i] for i in range(agent.num_followers)}
-            graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(agent.num_followers)}
-            graph_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(agent.num_followers)}
+            action_dict = {env._agent_ids[k]: action_exec[k] for k in range(agent.num_followers)}
+            graph_dict = {env._agent_ids[k]: graphs_array[k] for k in range(agent.num_followers)}
+            graph_soft_dict = {env._agent_ids[k]: graphs_soft_array[k] for k in range(agent.num_followers)}
 
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
-                action_dict,
-                graph_dict,
-                graph_soft_dict,
+            next_obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict = env.step(
+                action_dict, graph_dict, graph_soft_dict
             )
 
             next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
@@ -123,16 +121,26 @@ def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: in
             episode_reward += team_reward
             obs_array = next_obs_array
             h_in, c_in = h_out, c_out
+            last_info = info_dict[env._agent_ids[0]]
 
             if team_done:
                 break
 
-        step_avg_reward = episode_reward / (step + 1)
-        rewards.append(step_avg_reward)
+        rewards.append(episode_reward / (step + 1))
+        successes.append(float(last_info["success"]))
+        collisions.append(float(last_info["collision"]))
+        lengths.append(step + 1)
+        formation_errors.append(float(last_info["formation_error"]))
 
     np.random.set_state(rng_state)
 
-    return float(np.mean(rewards))
+    return {
+        "avg_reward": float(np.mean(rewards)),
+        "success_rate": float(np.mean(successes)),
+        "collision_rate": float(np.mean(collisions)),
+        "avg_episode_len": float(np.mean(lengths)),
+        "avg_formation_error": float(np.mean(formation_errors)),
+    }
 
 def parse_args():
     
@@ -228,6 +236,11 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=50, help="每隔多少个 episode 做一次多地图综合验证。")
     parser.add_argument("--eval_episodes", type=int, default=3, help="每种地图评估多少个 episode。")
 
+    # =========================================================
+    # 十、其他
+    # =========================================================
+    parser.add_argument("--no_belief", action="store_true", default=True, help="开启无 Belief 模块的消融实验。")
+
     args = parser.parse_args()
 
     # =========================================================
@@ -253,20 +266,28 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    # resume_checkpoint = None  
-    resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_366a4f_2026-04-21_09-55-48/latest_checkpoint" 
+    resume_checkpoint = None  
+    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_db239d_2026-04-23_19-54-32/latest_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-    random_suffix = uuid.uuid4().hex[:6]
-    task_dir = f"MADDPG_Formation_{random_suffix}_{timestamp}"
-    save_root_dir = os.path.join(base_save_dir, task_dir)
-    os.makedirs(save_root_dir, exist_ok=True)
-    
-    fixed_checkpoint_dir = os.path.join(save_root_dir, "latest_checkpoint")
-    print(f"📁 本次训练的根目录：{save_root_dir}")
+    if resume_checkpoint is not None and os.path.exists(resume_checkpoint):
+        # resume_checkpoint 指向 .../某次run/latest_checkpoint
+        fixed_checkpoint_dir = resume_checkpoint
+        save_root_dir = os.path.dirname(fixed_checkpoint_dir)
+        task_dir = os.path.basename(save_root_dir)
+        print(f"📁 续训写回原目录：{save_root_dir}")
+    else:
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+        random_suffix = uuid.uuid4().hex[:6]
+        task_dir = f"MADDPG_Formation_{random_suffix}_{timestamp}"
+        save_root_dir = os.path.join(base_save_dir, task_dir)
+        os.makedirs(save_root_dir, exist_ok=True)
 
-    # 初始化原生 TensorBoard 记录器
+        fixed_checkpoint_dir = os.path.join(save_root_dir, "latest_checkpoint")
+        print(f"📁 本次训练的根目录：{save_root_dir}")
+
+    best_checkpoint_dir = os.path.join(save_root_dir, "best_avg_checkpoint")
+
     writer = SummaryWriter(log_dir=save_root_dir)
 
     config = {
@@ -408,24 +429,42 @@ def main():
 
         # latest checkpoint
         if (episode + 1) % args.eval_every == 0:
-            
-            # 定义期末考试科目（你可以把想考的地图都写上）
-            # eval_maps = ["open", "z_map", "star_map", "custom"]
-            eval_maps = ["open"]
+
+            # 评估地图
+            eval_maps = ["open", "star_map", "hybrid"]
+
             scores = {}
-            
-            print(f"📊 Eval @ episode {episode+1}: ", end="")
+
+            print(f"📈 Eval @ episode {episode+1}: ", end="")
+
             for m in eval_maps:
-                score = evaluate_on_map(agent, env, m, args.eval_episodes, args.max_steps)
-                scores[m] = score
-                writer.add_scalar(f"Eval/{m}_Reward", score, episode)
-                print(f"{m}={score:.2f}, ", end="")
-                
-            # 计算平均分作为保存 best_model 的依据
+                metrics = evaluate_on_map(agent, env, m, args.eval_episodes, args.max_steps)
+
+                # 这里只保留 avg_reward 作为 best checkpoint 的主评分
+                scores[m] = metrics["avg_reward"]
+
+                # 写入 TensorBoard
+                writer.add_scalar(f"Eval/{m}_Reward", metrics["avg_reward"], episode)
+                writer.add_scalar(f"Eval/{m}_Success", metrics["success_rate"], episode)
+                writer.add_scalar(f"Eval/{m}_Collision", metrics["collision_rate"], episode)
+                writer.add_scalar(f"Eval/{m}_FormationError", metrics["avg_formation_error"], episode)
+                writer.add_scalar(f"Eval/{m}_EpisodeLen", metrics["avg_episode_len"], episode)
+
+                # 控制台打印
+                print(
+                    f"{m}: "
+                    f"R={metrics['avg_reward']:.2f}, "
+                    f"S={metrics['success_rate']:.3f}, "
+                    f"C={metrics['collision_rate']:.3f}, "
+                    f"F={metrics['avg_formation_error']:.3f}, ",
+                    end=""
+                )
+
+            # 仍然用各地图 avg_reward 的平均值作为 best model 判断依据
             score_avg = np.mean(list(scores.values()))
             writer.add_scalar("Eval/AvgReward", score_avg, episode)
-            
-            print(f"avg={score_avg:.2f}")
+
+            print(f"avgR={score_avg:.2f}")
 
             if score_avg > best_avg_score:
                 best_avg_score = score_avg
@@ -434,9 +473,8 @@ def main():
                 save_checkpoint(agent, episode + 1, best_checkpoint_dir)
                 print(f"🏆 [Best Avg Checkpoint Updated] -> {best_checkpoint_dir}")
 
-            # 覆盖保存最新的大脑
+            # 保存 latest
             save_checkpoint(agent, episode + 1, fixed_checkpoint_dir)
-            # 覆盖保存最新的经验池 (由于文件较大，每 50 局存一次既安全又不拖慢训练)
             buffer.save(fixed_checkpoint_dir)
             print(f"[Latest Checkpoint Saved] 进度已存档 -> {fixed_checkpoint_dir}")
 

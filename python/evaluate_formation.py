@@ -1,8 +1,11 @@
 import os
 import time
 import argparse
+from typing import Dict, List, Tuple
+
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 from envs.formation_2d_env import Formation2DMultiAgentEnv
 from agents.maddpg_agent import MADDPG_Agent
@@ -13,89 +16,137 @@ from agents.maddpg_agent import MADDPG_Agent
 # ==========================================
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="MADDPG + MAGIC Scheduler + CoDe Evaluation"
+        description="MADDPG + MAGIC Scheduler + CoDe Evaluation with trajectory visualization"
     )
 
     # =========================================================
-    # [新增] 评估专属参数
+    # 评估专属参数
     # =========================================================
-    parser.add_argument("--model_dir", type=str, 
-                        default="/home/nankai/formation_test/data/MADDPG_Formation_d3489b_2026-04-17_15-26-12/latest_checkpoint",
-                        help="要评估的模型文件夹路径 (包含 maddpg_checkpoint.pt 的目录)。")
-    
-    parser.add_argument("--eval_episodes", type=int, default=10, help="评估多少局。")
-    parser.add_argument("--map_mode", type=str, default="star_map", choices=["open", "z_map", "star_map", "custom"], help="你想在哪个地图上评估模型？")
-    parser.add_argument("--custom_map_path", type=str, default="/home/nankai/formation_test/maps/underground_garage5.pgm", help="真实地图路径。")
-
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        default="/home/nankai/formation_test/data/MADDPG_Formation_660865_2026-04-26_00-18-35/latest_checkpoint",
+        help="要评估的模型文件夹路径（包含 maddpg_checkpoint.pt 的目录）。",
+    )
+    parser.add_argument("--eval_episodes", type=int, default=3, help="评估多少局。")
+    parser.add_argument(
+        "--map_mode",
+        type=str,
+        default="star_map",
+        choices=["open", "z_map", "star_map", "hybrid", "custom"],
+        help="评估地图模式。",
+    )
+    parser.add_argument(
+        "--custom_map_path",
+        type=str,
+        default="/home/nankai/formation_test/maps/underground_garage5.pgm",
+        help="真实地图路径。",
+    )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        default=True,
+        help="是否实时渲染环境窗口。临时观察行为时打开；批量导图时可关闭。",
+    )
+    parser.add_argument(
+        "--save_fig",
+        action="store_true",
+        default=True,
+        help="是否保存论文用轨迹图。",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="/home/nankai/formation_test/eval_outputs",
+        help="评估结果与轨迹图保存目录。",
+    )
+    parser.add_argument(
+        "--save_npz",
+        action="store_true",
+        default=True,
+        help="是否把轨迹数据保存成 npz，便于后处理。",
+    )
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=0.01,
+        help="render 打开时每步暂停秒数；批量导图时可设为 0。",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=123,
+        help="评估基础随机种子。每个 episode 会在此基础上递增。",
+    )
 
     # =========================================================
-    # 一、环境参数
+    # 环境参数
     # =========================================================
     parser.add_argument("--num_robots", type=int, default=3, help="总机器人数量，包含 1 个 leader 和 N-1 个 follower。")
     parser.add_argument("--max_steps", type=int, default=1000, help="每个评估 episode 的最大步数。")
     parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径。")
 
     # =========================================================
-    # 二、MADDPG 基础参数（评估时主要为了初始化 Agent）
+    # MADDPG 基础参数（评估时主要用于初始化 Agent）
     # =========================================================
-    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor 学习率，占位参数，评估时不更新。")
-    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic 学习率，占位参数，评估时不更新。")
-    parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子，占位参数。")
-    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数，占位参数。")
+    parser.add_argument("--lr_actor", type=float, default=5e-5)
+    parser.add_argument("--lr_critic", type=float, default=3e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--tau", type=float, default=0.005)
 
     # =========================================================
-    # 三、MAGIC 调度器参数
+    # MAGIC 调度器参数
     # =========================================================
-    parser.add_argument("--hid_size", type=int, default=64, help="LSTM 隐状态维度。")
-    parser.add_argument("--gat_hid_size", type=int, default=64, help="GAT 中间特征维度。")
-    parser.add_argument("--gat_num_heads", type=int, default=4, help="第一轮 GAT 多头数。")
-    parser.add_argument("--gat_num_heads_out", type=int, default=1, help="第二轮 GAT 多头数。")
-    parser.add_argument("--self_loop_type1", type=int, default=2, help="第一层自环控制方式。")
-    parser.add_argument("--self_loop_type2", type=int, default=2, help="第二层自环控制方式。")
-    parser.add_argument("--first_gat_normalize", action="store_true", default=False, help="是否对第一层 GAT 注意力归一化。")
-    parser.add_argument("--second_gat_normalize", action="store_true", default=False, help="是否对第二层 GAT 注意力归一化。")
+    parser.add_argument("--hid_size", type=int, default=64)
+    parser.add_argument("--gat_hid_size", type=int, default=64)
+    parser.add_argument("--gat_num_heads", type=int, default=4)
+    parser.add_argument("--gat_num_heads_out", type=int, default=1)
+    parser.add_argument("--self_loop_type1", type=int, default=2)
+    parser.add_argument("--self_loop_type2", type=int, default=2)
+    parser.add_argument("--first_gat_normalize", action="store_true", default=False)
+    parser.add_argument("--second_gat_normalize", action="store_true", default=False)
 
-    parser.add_argument("--use_gat_encoder", action="store_true", default=False, help="是否启用 scheduler 前的 GAT encoder。")
-    parser.add_argument("--first_graph_complete", action="store_true", default=False, help="第一轮通信图是否强制全连接。")
+    parser.add_argument("--use_gat_encoder", action="store_true", default=False)
+    parser.add_argument("--first_graph_complete", action="store_true", default=False)
 
-    parser.add_argument("--learn_second_graph", dest="learn_second_graph", action="store_true", help="是否启用第二轮调度器。")
-    parser.add_argument("--no_learn_second_graph", dest="learn_second_graph", action="store_false", help="是否关闭第二轮调度器。")
+    parser.add_argument("--learn_second_graph", dest="learn_second_graph", action="store_true")
+    parser.add_argument("--no_learn_second_graph", dest="learn_second_graph", action="store_false")
     parser.set_defaults(learn_second_graph=True)
 
-    parser.add_argument("--second_graph_complete", action="store_true", default=False, help="第二轮通信图是否强制全连接。")
+    parser.add_argument("--second_graph_complete", action="store_true", default=False)
 
-    parser.add_argument("--directed", dest="directed", action="store_true", help="使用有向通信图。")
-    parser.add_argument("--undirected", dest="directed", action="store_false", help="使用无向通信图。")
+    parser.add_argument("--directed", dest="directed", action="store_true")
+    parser.add_argument("--undirected", dest="directed", action="store_false")
     parser.set_defaults(directed=True)
 
-    parser.add_argument("--comm_mask_zero", action="store_true", default=False, help="是否强制关闭通信。")
+    parser.add_argument("--comm_mask_zero", action="store_true", default=True)
 
-    parser.add_argument("--gat_encoder_out_size", type=int, default=64, help="scheduler 专属 GAT encoder 输出维度。")
-    parser.add_argument("--ge_num_heads", type=int, default=4, help="scheduler 专属 GAT encoder 多头数。")
-    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False, help="scheduler 专属 GAT encoder 是否归一化。")
+    parser.add_argument("--gat_encoder_out_size", type=int, default=64)
+    parser.add_argument("--ge_num_heads", type=int, default=4)
+    parser.add_argument("--gat_encoder_normalize", action="store_true", default=False)
 
-    parser.add_argument("--message_encoder", action="store_true", default=False, help="发送端是否对 hidden state 再做一层消息映射。")
-    parser.add_argument("--message_decoder", action="store_true", default=False, help="接收端是否对融合消息再做一层映射。")
-    parser.add_argument("--comm_init", type=str, default="zeros", help="通信模块初始化方式。")
-
-    # =========================================================
-    # 四、CoDe 参数
-    # =========================================================
-    parser.add_argument("--intent_dim", type=int, default=32, help="意图向量维度。")
-    parser.add_argument("--decoder_hidden_dim", type=int, default=64, help="Intent Decoder 的 GRU hidden 维度。")
-    parser.add_argument("--value_dim", type=int, default=64, help="接收端融合消息向量维度。")
-    parser.add_argument("--attn_dim", type=int, default=32, help="Q/K 投影维度。")
-    parser.add_argument("--gamma_t", type=float, default=0.90, help="消息时间衰减系数。")
-    parser.add_argument("--lambda_inf", type=float, default=1.0, help="L_inf 权重，占位参数。")
-    parser.add_argument("--lambda_c", type=float, default=0.1, help="L_c 权重，占位参数。")
-    parser.add_argument("--lambda_k", type=float, default=1e-3, help="L_k 权重，占位参数。")
-    parser.add_argument("--lambda_e", type=float, default=1e-3, help="L_e 权重，占位参数。")
-    parser.add_argument("--eps", type=float, default=1e-8, help="数值稳定项。")
-    parser.add_argument("--renorm_after_decay", action="store_true", default=False, help="时间衰减后是否重新归一化注意力。")
-    parser.add_argument("--pred_horizon", type=int, default=4, help="发送端 decoder 预测未来动作的步数 K。")
+    parser.add_argument("--message_encoder", action="store_true", default=False)
+    parser.add_argument("--message_decoder", action="store_true", default=False)
+    parser.add_argument("--comm_init", type=str, default="zeros")
 
     # =========================================================
-    # 五、延迟设置
+    # CoDe 参数
+    # =========================================================
+    parser.add_argument("--intent_dim", type=int, default=32)
+    parser.add_argument("--decoder_hidden_dim", type=int, default=64)
+    parser.add_argument("--value_dim", type=int, default=64)
+    parser.add_argument("--attn_dim", type=int, default=32)
+    parser.add_argument("--gamma_t", type=float, default=0.90)
+    parser.add_argument("--lambda_inf", type=float, default=1.0)
+    parser.add_argument("--lambda_c", type=float, default=0.1)
+    parser.add_argument("--lambda_k", type=float, default=1e-3)
+    parser.add_argument("--lambda_e", type=float, default=1e-3)
+    parser.add_argument("--eps", type=float, default=1e-8)
+    parser.add_argument("--renorm_after_decay", action="store_true", default=False)
+    parser.add_argument("--pred_horizon", type=int, default=5)
+
+    # =========================================================
+    # 延迟设置
     # =========================================================
     parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"], help="通信延迟模式。")
     parser.add_argument("--fixed_delay", type=int, default=2, help="固定延迟模式下的延迟步数。")
@@ -104,13 +155,11 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # =========================================================
-    # 六、派生参数
-    # =========================================================
+    # 派生参数
     args.num_followers = args.num_robots - 1
     args.nagents = args.num_followers
     args.action_dim = 2
-    args.obs_size = 58 # ✅ 必须改为 35，适配最新加入的 formation_alpha 指令！
+    args.obs_size = 58
 
     return args
 
@@ -118,7 +167,7 @@ def parse_args():
 # ==========================================
 # 1. 只加载模型权重
 # ==========================================
-def load_evaluate_model(agent, path):
+def load_evaluate_model(agent, path: str) -> int:
     checkpoint_file = os.path.join(path, "maddpg_checkpoint.pt")
     if not os.path.exists(checkpoint_file):
         raise FileNotFoundError(f"找不到模型文件，请检查路径: {checkpoint_file}")
@@ -126,20 +175,151 @@ def load_evaluate_model(agent, path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_file, map_location=device)
 
-    # 评估时主要使用 actor
     agent.actor.load_state_dict(checkpoint["actor"])
-
-    # 同步 target_actor，避免内部状态不一致
     if "target_actor" in checkpoint:
         agent.target_actor.load_state_dict(checkpoint["target_actor"])
     else:
         agent.target_actor.load_state_dict(checkpoint["actor"])
 
-    print(f"✅ 成功加载第 {checkpoint['episode']} 轮的模型。")
+    episode = int(checkpoint.get("episode", -1))
+    print(f"✅ 成功加载第 {episode} 轮的模型。")
+    return episode
 
 
 # ==========================================
-# 2. 主评估流程
+# 2. 轨迹记录与可视化
+# ==========================================
+def _record_positions(env, traj: Dict[str, List[np.ndarray]]) -> None:
+    traj["leader"].append(np.array(env.leader_pos, dtype=np.float32).copy())
+    for i, pos in enumerate(env.follower_pos):
+        traj[f"follower_{i}"] .append(np.array(pos, dtype=np.float32).copy())
+
+
+def _map_title(map_mode: str) -> str:
+    mapping = {
+        "open": "Open Map",
+        "star_map": "Pillar Hall Map",
+        "hybrid": "Hybrid Indoor Map",
+        "z_map": "Z-Corridor Map",
+        "custom": "Custom Map",
+    }
+    return mapping.get(map_mode, map_mode)
+
+
+def _plot_single_trajectory(env, traj: Dict[str, List[np.ndarray]], save_path: str, title: str) -> None:
+    fig, ax = plt.subplots(figsize=(7.5, 7.5))
+
+    height, width = env.map_grid.shape
+    res = env.map_resolution  # 你的分辨率是 0.1 米/像素
+    
+    # 你的环境是把原点 (0,0) 放在地图中心的，所以计算出物理边界：
+    extent = [
+        -width / 2 * res,  # X 轴下界
+         width / 2 * res,  # X 轴上界
+        -height / 2 * res, # Y 轴下界
+         height / 2 * res  # Y 轴上界
+    ]
+
+    # 背景障碍物
+    grid = np.array(env.map_grid, dtype=np.uint8)
+    ax.imshow(grid, cmap="gray_r", origin="lower", extent=extent)
+
+    # 领导者轨迹
+    leader = np.array(traj["leader"])
+    if len(leader) > 0:
+        ax.plot(leader[:, 0], leader[:, 1], linewidth=2.5, label="Leader")
+        ax.scatter(leader[0, 0], leader[0, 1], s=60, marker="o")
+        ax.scatter(leader[-1, 0], leader[-1, 1], s=80, marker="*")
+
+    # 跟随者轨迹
+    follower_keys = sorted([k for k in traj.keys() if k.startswith("follower_")])
+    for idx, key in enumerate(follower_keys):
+        arr = np.array(traj[key])
+        if len(arr) == 0:
+            continue
+        ax.plot(arr[:, 0], arr[:, 1], linewidth=2.0, label=f"Follower {idx+1}")
+        ax.scatter(arr[0, 0], arr[0, 1], s=40, marker="o")
+        ax.scatter(arr[-1, 0], arr[-1, 1], s=55, marker="x")
+
+    ax.set_title(title)
+    ax.set_xlabel("Map X (meters)")
+    ax.set_ylabel("Map Y (meters)")
+    ax.set_aspect("equal")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(False)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=220)
+    plt.close(fig)
+
+
+# ==========================================
+# 3. 单局 rollout + 指标
+# ==========================================
+def run_one_episode(agent, env, args, episode_idx: int) -> Tuple[float, int, Dict, Dict[str, List[np.ndarray]]]:
+    obs_dict, _ = env.reset(seed=args.seed + episode_idx)
+    obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
+    h_in, c_in = agent.init_hidden()
+    agent.reset_runtime()
+
+    episode_reward = 0.0
+    last_info = None
+
+    traj = {"leader": []}
+    for i in range(args.num_followers):
+        traj[f"follower_{i}"] = []
+    _record_positions(env, traj)
+
+    # 初始化一个“平滑动作”变量
+    smoothed_action = np.zeros((args.num_followers, args.action_dim), dtype=np.float32)
+    # 平滑系数 tau_action (0 到 1 之间)。越接近 1 越平滑 (惯性越大)，越接近 0 越相信网络原始输出。
+    # 0.8 是一个非常经典的经验值
+    tau_action = 0.8 
+
+    for step in range(args.max_steps):
+        action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
+            obs_array,
+            h_in,
+            c_in,
+            add_noise=False,
+        )
+
+        smoothed_action = tau_action * smoothed_action + (1.0 - tau_action) * action_exec
+
+        action_dict = {env._agent_ids[i]: smoothed_action[i] for i in range(args.num_followers)}
+        graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
+        graph_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
+
+        next_obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict = env.step(
+            action_dict,
+            graph_dict,
+            graph_soft_dict,
+        )
+
+        next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+
+        team_reward = reward_dict[env._agent_ids[0]]
+        team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
+
+        episode_reward += team_reward
+        obs_array = next_obs_array
+        h_in, c_in = h_out, c_out
+        last_info = info_dict[env._agent_ids[0]]
+
+        _record_positions(env, traj)
+
+        if args.render and args.sleep > 0:
+            time.sleep(args.sleep)
+
+        if team_done:
+            break
+
+    return episode_reward, step + 1, last_info or {}, traj
+
+
+# ==========================================
+# 4. 主评估流程
 # ==========================================
 def main():
     args = parse_args()
@@ -147,11 +327,10 @@ def main():
     print(f"评估启动，运行设备: {device}")
     print(f"即将测试的地图模式: {args.map_mode}")
 
-    # ✅ 把地图模式塞进 config 给环境初始化用
     config = {
         "num_robots": args.num_robots,
         "max_steps": args.max_steps,
-        "render": True,
+        "render": args.render,
         "sensing_radius": args.sensing_radius,
         "map_mode": args.map_mode,
         "custom_map_path": args.custom_map_path,
@@ -159,55 +338,80 @@ def main():
 
     env = Formation2DMultiAgentEnv(config)
     agent = MADDPG_Agent(args)
-    load_evaluate_model(agent, args.model_dir)
+    loaded_episode = load_evaluate_model(agent, args.model_dir)
+
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    rewards = []
+    lengths = []
+    successes = []
+    collisions = []
+    formation_errors = []
+
+    best_reward = -1e18
+    best_record = None
 
     for episode in range(args.eval_episodes):
-        obs_dict, _ = env.reset()
-        obs_array = np.array([obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
+        episode_reward, ep_len, info, traj = run_one_episode(agent, env, args, episode)
 
-        # 每个 episode 初始化 LSTM 和记忆化延迟缓冲
-        h_in, c_in = agent.init_hidden()
-        agent.reset_runtime()
+        success = float(info.get("success", 0.0))
+        collision = float(info.get("collision", 0.0))
+        formation_error = float(info.get("formation_error", np.nan))
 
-        episode_reward = 0.0
+        rewards.append(episode_reward)
+        lengths.append(ep_len)
+        successes.append(success)
+        collisions.append(collision)
+        formation_errors.append(formation_error)
 
-        for step in range(args.max_steps):
-            # 新版接口返回 7 个量
-            action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
-                obs_array,
-                h_in,
-                c_in,
-                add_noise=False, # 评估时严格无噪
+        print(
+            f"评估 {episode + 1}/{args.eval_episodes} | 步数: {ep_len:3d} | "
+            f"总得分: {episode_reward:8.2f} | 成功: {int(success)} | 碰撞: {int(collision)} | 编队误差: {formation_error:.3f}"
+        )
+
+        if episode_reward > best_reward:
+            best_reward = episode_reward
+            best_record = {
+                "episode_idx": episode,
+                "traj": traj,
+                "info": info,
+            }
+
+        if args.save_npz:
+            npz_path = os.path.join(
+                args.save_dir,
+                f"rollout_{args.map_mode}_ep{episode+1:02d}.npz",
             )
+            payload = {k: np.array(v, dtype=np.float32) for k, v in traj.items()}
+            payload["episode_reward"] = np.array([episode_reward], dtype=np.float32)
+            payload["episode_len"] = np.array([ep_len], dtype=np.int32)
+            payload["success"] = np.array([success], dtype=np.float32)
+            payload["collision"] = np.array([collision], dtype=np.float32)
+            payload["formation_error"] = np.array([formation_error], dtype=np.float32)
+            np.savez(npz_path, **payload)
 
-            # 评估时执行无噪动作；这里 action_exec == action_policy，因为 add_noise=False
-            action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
-            graph_dict = {env._agent_ids[i]: graphs_array[i] for i in range(args.num_followers)}
-            graph_soft_dict = {env._agent_ids[i]: graphs_soft_array[i] for i in range(args.num_followers)}
+        if args.save_fig:
+            fig_name = f"traj_{args.map_mode}_ep{episode+1:02d}.png"
+            fig_path = os.path.join(args.save_dir, fig_name)
+            title = f"{_map_title(args.map_mode)} | ep {episode+1} | model ep {loaded_episode}"
+            _plot_single_trajectory(env, traj, fig_path, title)
+            print(f"🖼️ 第 {episode+1} 局轨迹图已保存: {fig_path}")
 
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, _ = env.step(
-                action_dict,
-                graph_dict,
-                graph_soft_dict
-            )
+    print("\n================ 评估汇总 ================")
+    print(f"Map               : {_map_title(args.map_mode)}")
+    print(f"Model Episode     : {loaded_episode}")
+    print(f"Avg Reward        : {np.mean(rewards):.3f}")
+    print(f"Success Rate      : {np.mean(successes):.3f}")
+    print(f"Collision Rate    : {np.mean(collisions):.3f}")
+    print(f"Avg Episode Len   : {np.mean(lengths):.3f}")
+    print(f"Avg Formation Err : {np.nanmean(formation_errors):.3f}")
 
-            next_obs_array = np.array([next_obs_dict[agent_id] for agent_id in env._agent_ids], dtype=np.float32)
-
-            team_reward = reward_dict[env._agent_ids[0]]
-            team_done = terminated_dict["__all__"] or truncated_dict["__all__"]
-
-            episode_reward += team_reward
-
-            obs_array = next_obs_array
-            h_in = h_out
-            c_in = c_out
-
-            time.sleep(0.01)
-
-            if team_done:
-                break
-
-        print(f"评估 {episode + 1}/{args.eval_episodes} | 步数: {step + 1:3d} | 总得分: {episode_reward:8.2f}")
+    # if args.save_fig and best_record is not None:
+    #     fig_name = f"traj_{args.map_mode}_best.png"
+    #     fig_path = os.path.join(args.save_dir, fig_name)
+    #     title = f"{_map_title(args.map_mode)} | best rollout | model ep {loaded_episode}"
+    #     _plot_single_trajectory(env, best_record["traj"], fig_path, title)
+    #     print(f"🖼️ 轨迹图已保存: {fig_path}")
 
     print("\n评估结束。")
 

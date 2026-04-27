@@ -44,7 +44,7 @@ class MADDPGFormationReward:
         return float(alpha)
 
     
-    def compute(self, leader_pos, follower_positions, prev_follower_positions, leader_yaw, in_danger_zone, in_crash_zone, dynamic_connections, corridor_width):
+    def compute(self, leader_pos, follower_positions, prev_follower_positions, leader_yaw, follower_yaw, in_danger_zone, in_crash_zone, dynamic_connections, corridor_width):
         num_followers = len(follower_positions)
         team_reward = 0.0
         all_positions = [leader_pos] + list(follower_positions)
@@ -77,17 +77,19 @@ class MADDPGFormationReward:
             team_reward -= self.w_direction * direction_penalty
             reward_details['direction'] -= self.w_direction * direction_penalty
 
-            prev_rel = prev_follower_positions[i] - leader_pos
-            curr_rel = follower_positions[i] - leader_pos
+            my_yaw = follower_yaw[i]
+            # 建立小弟自身的正前和正左方向向量
+            my_forward_vec = np.array([np.cos(my_yaw), np.sin(my_yaw)])
+            my_left_vec = np.array([-np.sin(my_yaw), np.cos(my_yaw)]) 
 
-            delta_rel = curr_rel - prev_rel
-            lon_move = abs(np.dot(delta_rel, forward_vec)) #纵向位移
-            lat_move = abs(np.dot(delta_rel, left_vec)) #横向位移
+            delta_pos = follower_positions[i] - prev_follower_positions[i]
+            
+            # 将位移投影到小弟自己的车头方向上
+            my_lon_move = abs(np.dot(delta_pos, my_forward_vec)) # 自己往前走了多少 (对应 ax)
+            my_lat_move = abs(np.dot(delta_pos, my_left_vec))    # 自己横向漂了多少 (对应 ay)
 
-            lon_excess = max(0.0, lon_move - 0.08)
-            lat_excess = max(0.0, lat_move - 0.03)
-
-            jitter_penalty = 0.3 * lon_excess + 1.0 * lat_excess
+            # 采用平方惩罚：对横向漂移施加毁灭性打击
+            jitter_penalty = 100 * (my_lat_move ** 2)
 
             team_reward -= self.w_jitter * jitter_penalty
             reward_details['jitter'] -= self.w_jitter * jitter_penalty
