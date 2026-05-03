@@ -14,8 +14,9 @@ from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
 # ✅ 2. 继承 MultiAgentEnv 而不是 gym.Env
 class Formation2DMultiAgentEnv(MultiAgentEnv):
-    def __init__(self, config):
+    def __init__(self, config, args=None):
         super().__init__()
+        self.args = args
         self.num_robots = config.get("num_robots", 5) # 默认 5 个机器人
         self.num_followers = self.num_robots - 1
         
@@ -52,7 +53,7 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         self.map_mode = config.get("map_mode", "open")
 
-        self.sensing_radius = config.get("sensing_radius", 5.0)  # 最大感知半径 (米)
+        self.sensing_radius = config.get("sensing_radius", 1.5)  # 最大感知半径 (米)
         self.max_visible_teammates = 3  # 网络最多只管最近的 3 个兄弟
         
         self.safety_threshold = 0.5
@@ -562,11 +563,14 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
 
         # ✅ 物理断网模拟：提取所有小弟的当前坐标，计算 N x N 的通信可用矩阵
         # 设置最大通信距离为 8.0 米，基础丢包率为 10%
-        physical_comm_mask = self.get_communication_mask(
-            self.follower_pos, 
-            max_dist=8.0, 
-            drop_rate=0.1
-        )
+        physical_comm_mask = np.ones((len(self.follower_pos), len(self.follower_pos)), dtype=np.float32)
+
+        if getattr(self.args, 'interruption_loss_packet', False):
+            physical_comm_mask = self.get_communication_mask(
+                self.follower_pos, 
+                max_dist=8.0, 
+                drop_rate=0.1
+            )
 
         # 把物理网络状态存入 info_dict，让主训练循环能拿到
         for i, agent_id in enumerate(self._agent_ids): 
@@ -624,19 +628,18 @@ class Formation2DMultiAgentEnv(MultiAgentEnv):
         # ✅ 3. 核心升级：KNN + 感知半径 过滤兄弟
         # ==========================================
         entities = []
+        myopic_radius = 1.5
 
-        # 1. 考察老大 (Global ID: 0)
-        dist_to_leader = np.linalg.norm(leader_rel_global)
-        if dist_to_leader <= self.sensing_radius:
-            entities.append({'dist': dist_to_leader, 'rel_pos': leader_rel, 'global_id': 0})
-
-        # 2. 考察其他兄弟 (Global ID: j + 1)
-        for j in range(self.num_followers):
-            if j != follower_idx:
-                rel_global = self.follower_pos[j] - my_pos
-                dist = np.linalg.norm(rel_global)
-                if dist <= self.sensing_radius:
-                    entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global), 'global_id': j + 1})
+        # 考察老大和所有兄弟 (不再区分是谁)
+        all_others_pos = [self.leader_pos] + [self.follower_pos[k] for k in range(self.num_followers) if k != follower_idx]
+        
+        for pos in all_others_pos:
+            rel_global = pos - my_pos
+            dist = np.linalg.norm(rel_global)
+            
+            # 只有当队友极其靠近（即将发生碰撞）时，本地雷达才能看到
+            if dist <= myopic_radius:
+                entities.append({'dist': dist, 'rel_pos': global_to_local(rel_global)})
 
         # 排序并截取最近的 3 个
         entities = sorted(entities, key=lambda x: x['dist'])[:self.max_visible_teammates]

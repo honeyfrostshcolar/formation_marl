@@ -1,0 +1,8 @@
+Map: Pillar Hall Map
+Model Episode: 1300
+Evaluated Episodes: 50
+Avg Reward: 33.148 ± 62.229
+Avg Episode Len: 135.180 ± 51.224
+Success Rate: 0.980 ± 0.140
+Collision Rate: 0.020 ± 0.140
+Avg Formation Err: 0.431 ± 0.228

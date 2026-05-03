@@ -43,7 +43,7 @@ class MADDPG_Agent:
         c = torch.zeros(1, self.num_followers, self.args.hid_size, device=self.device)
         return h, c
 
-    def select_action(self, obs_array, h_in, c_in, add_noise=True, noise_scale=0.15):
+    def select_action(self, obs_array, h_in, c_in, add_noise=True, noise_scale=0.15, physical_comm_mask=None):
         obs_tensor = torch.as_tensor(obs_array, dtype=torch.float32, device=self.device).unsqueeze(0)
         self.actor.eval()
         with torch.no_grad():
@@ -52,7 +52,7 @@ class MADDPG_Agent:
                 (h_in, c_in),
                 prev_action=None,
                 runtime_mode=True,
-                external_comm=None,
+                external_comm={"physical_comm_mask": physical_comm_mask} if physical_comm_mask is not None else None,  # [MOD 9-3] 传入物理网络状态
             )
         self.actor.train()
 

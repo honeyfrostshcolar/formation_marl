@@ -371,11 +371,15 @@ class MAGICCoDeActor(nn.Module):
             # -----------------------------
             if b != 1:
                 raise ValueError("runtime_mode=True 目前只支持 batch_size=1")
+            
+            physical_comm_mask = external_comm["physical_comm_mask"] if external_comm is not None else 1
+
+            actual_route_hard = route_hard[0] * physical_comm_mask
 
             delay_mat = self.runtime_buffer.push_current_packets(
                 sender_intents=intents[0],
                 sender_hidden=sender_hidden[0],
-                route_mask=route_hard[0],   # 运行时只用硬图
+                route_mask=actual_route_hard,   # 运行时只用硬图
             )
 
             recv_inputs = self.runtime_buffer.collect_receiver_inputs(

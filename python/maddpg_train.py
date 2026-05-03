@@ -18,6 +18,7 @@ def save_checkpoint(agent, episode, path):
     os.makedirs(path, exist_ok=True)
     checkpoint = {
         'episode': episode,
+        'best_score': best_score,
         'actor': agent.actor.state_dict(),
         'critic': agent.critic.state_dict(),
         'target_actor': agent.target_actor.state_dict(),
@@ -40,11 +41,14 @@ def load_checkpoint(agent, path):
         agent.target_critic.load_state_dict(checkpoint['target_critic'])
         agent.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
         agent.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+
+        best_score = checkpoint.get('best_score', -1e18)
         return checkpoint['episode']
     return 0
 
 CURRICULUM_SCHEDULE = [
-    (0,    {"star_map": 1.0}),                                   
+    (0,    {"open": 1.0}),                                   
+    (500,    {"star_map": 1.0}),                                   
     (10000, {"open": 0.4, "star_map": 0.6}),                     
     # (3000, {"open": 0.4, "star_map": 0.5, "z_map": 0.1}),                     
     # (3500, {"open": 0.4, "star_map": 0.4, "z_map": 0.2}),                     
@@ -99,10 +103,17 @@ def evaluate_on_map(agent, env, map_mode: str, eval_episodes: int, max_steps: in
 
         episode_reward = 0.0
         last_info = None
+        phys_mask = np.ones((agent.num_followers, agent.num_followers), dtype=np.float32) # [MOD 9-3] 评估时默认物理网络全连通
 
         for step in range(max_steps):
+
+            if last_info and "follower_0" in last_info and "physical_comm_mask" in last_info["follower_0"]:
+                phys_mask = last_info["follower_0"]["physical_comm_mask"]
+
+            phys_mask_tensor = torch.as_tensor(phys_mask, dtype=torch.float32, device=agent.device).unsqueeze(0)
+
             action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
-                obs_array, h_in, c_in, add_noise=False,
+                obs_array, h_in, c_in, add_noise=False, physical_comm_mask=phys_mask_tensor
             )
 
             action_dict = {env._agent_ids[k]: action_exec[k] for k in range(agent.num_followers)}
@@ -154,14 +165,14 @@ def parse_args():
     parser.add_argument("--train_iterations", type=int, default=10000, help="总训练回合数（episode 数）。")
     parser.add_argument("--batch_size", type=int, default=256, help="每次网络更新时从经验池采样的 batch 大小。")
     parser.add_argument("--buffer_capacity", type=int, default=10000, help="经验回放池最多可存储的 transition 数量。")
-    parser.add_argument("--sensing_radius", type=float, default=5.0, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
+    parser.add_argument("--sensing_radius", type=float, default=1.5, help="每个 follower 的局部感知半径，超出该范围的队友不会进入观测。")
     parser.add_argument("--render", action="store_true", default=False, help="是否开启环境渲染。训练时通常关闭以提升速度。")
 
     # =========================================================
     # 二、MADDPG 强化学习参数
     # =========================================================
-    parser.add_argument("--lr_actor", type=float, default=5e-5, help="Actor（策略网络）的学习率。")
-    parser.add_argument("--lr_critic", type=float, default=3e-4, help="Critic（价值网络）的学习率。")
+    parser.add_argument("--lr_actor", type=float, default=1e-4, help="Actor（策略网络）的学习率。")
+    parser.add_argument("--lr_critic", type=float, default=1e-3, help="Critic（价值网络）的学习率。")
     parser.add_argument("--gamma", type=float, default=0.99, help="奖励折扣因子 gamma，越接近 1 越重视长期回报。")
     parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数 tau。")
 
@@ -239,7 +250,8 @@ def parse_args():
     # =========================================================
     # 十、其他
     # =========================================================
-    parser.add_argument("--no_belief", action="store_true", default=True, help="开启无 Belief 模块的消融实验。")
+    parser.add_argument("--no_belief", action="store_true", default=False, help="开启无 Belief 模块的消融实验。")
+    parser.add_argument("--interruption_loss_packet", action="store_true", default=True, help="开启中断、丢包消融实验。")
 
     args = parser.parse_args()
 
@@ -266,16 +278,14 @@ def main():
     
     # ⚠️ 断点续训设置 
     # 如果想从头训练，保持 None；如果想继续，填入 latest_checkpoint 路径
-    resume_checkpoint = None  
-    # resume_checkpoint = "/home/nankai/formation_test/data/MADDPG_Formation_db239d_2026-04-23_19-54-32/latest_checkpoint" 
+    # resume_checkpoint = None  
+    resume_checkpoint = "/home/nankai/formation_test/paperdata/full_star_fixed-2_noposobs/best_avg_checkpoint" 
 
     # 生成本次运行专属的文件夹名字
     if resume_checkpoint is not None and os.path.exists(resume_checkpoint):
         # resume_checkpoint 指向 .../某次run/latest_checkpoint
-        fixed_checkpoint_dir = resume_checkpoint
-        save_root_dir = os.path.dirname(fixed_checkpoint_dir)
-        task_dir = os.path.basename(save_root_dir)
-        print(f"📁 续训写回原目录：{save_root_dir}")
+        save_root_dir = os.path.dirname(resume_checkpoint)
+        print(f"📁 [原地续训] 所有的记录和权重将继续写回原目录：{save_root_dir}")
     else:
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         random_suffix = uuid.uuid4().hex[:6]
@@ -286,6 +296,7 @@ def main():
         fixed_checkpoint_dir = os.path.join(save_root_dir, "latest_checkpoint")
         print(f"📁 本次训练的根目录：{save_root_dir}")
 
+    fixed_checkpoint_dir = os.path.join(save_root_dir, "latest_checkpoint")
     best_checkpoint_dir = os.path.join(save_root_dir, "best_avg_checkpoint")
 
     writer = SummaryWriter(log_dir=save_root_dir)
@@ -314,7 +325,7 @@ def main():
     if resume_checkpoint is not None:
         if os.path.exists(resume_checkpoint):
             print(f"\n🔄 [恢复训练] 正在加载检查点：{resume_checkpoint}")
-            start_episode = load_checkpoint(agent, resume_checkpoint)
+            start_episode, best_avg_score = load_checkpoint(agent, resume_checkpoint)
             buffer.load(resume_checkpoint) # 同步加载经验池状态
             print(f"✅ [恢复成功] 将从第 {start_episode} 轮继续训练！\n")
         else:
@@ -330,11 +341,11 @@ def main():
 
     for episode in range(start_episode, train_iterations):
 
-        if episode < 2000:
+        if episode < 700:
             current_noise = 0.15
         else:
-            progress = min(1.0, (episode - 2000) / 1000)
-            current_noise = 0.10 - progress * 0.09
+            progress = min(1.0, (episode - 700) / 1200)  
+            current_noise = 0.15 - progress * 0.14
             current_noise = max(current_noise, 0.01)
 
         # [新增] 课程训练：每局先选地图
@@ -351,13 +362,18 @@ def main():
         actor_losses = []
         critic_losses = []
 
+        phys_mask = np.ones((agent.num_followers, agent.num_followers), dtype=np.float32) # [MOD 9-3] 训练时默认物理网络全连通
+
         for step in range(args.max_steps):
+
+            phys_mask_tensor = torch.as_tensor(phys_mask, dtype=torch.float32, device=agent.device).unsqueeze(0)
             action_policy, action_exec, graphs_array, graphs_soft_array, h_out, c_out, comm_snapshot = agent.select_action(
                 obs_array,
                 h_in,
                 c_in,
                 add_noise=True,
                 noise_scale=current_noise,
+                physical_comm_mask=phys_mask_tensor,  # [MOD 9-3] 将物理网络状态传入智能体选择动作
             )
 
             action_dict = {env._agent_ids[i]: action_exec[i] for i in range(args.num_followers)}
@@ -377,6 +393,7 @@ def main():
             first_follower_id = env._agent_ids[0] #每个智能体的mask都是一样的，包含了N*N的图
             if first_follower_id in info_dict and "physical_comm_mask" in info_dict[first_follower_id]:
                 comm_snapshot["recv_mask"] = info_dict[first_follower_id]["physical_comm_mask"]
+                phys_mask = comm_snapshot["recv_mask"]
 
             buffer.store({
                 "obs": obs_array,
@@ -431,7 +448,8 @@ def main():
         if (episode + 1) % args.eval_every == 0:
 
             # 评估地图
-            eval_maps = ["open", "star_map", "hybrid"]
+            # eval_maps = ["open", "star_map", "hybrid"]
+            eval_maps = ["star_map"]
 
             scores = {}
 
@@ -470,16 +488,16 @@ def main():
                 best_avg_score = score_avg
                 if os.path.exists(best_checkpoint_dir):
                     shutil.rmtree(best_checkpoint_dir, ignore_errors=True)
-                save_checkpoint(agent, episode + 1, best_checkpoint_dir)
+                save_checkpoint(agent, episode + 1, best_checkpoint_dir, best_score=best_avg_score)
                 print(f"🏆 [Best Avg Checkpoint Updated] -> {best_checkpoint_dir}")
 
             # 保存 latest
-            save_checkpoint(agent, episode + 1, fixed_checkpoint_dir)
+            save_checkpoint(agent, episode + 1, fixed_checkpoint_dir, best_score=best_avg_score)
             buffer.save(fixed_checkpoint_dir)
             print(f"[Latest Checkpoint Saved] 进度已存档 -> {fixed_checkpoint_dir}")
 
     # 训练彻底结束时保存最终模型
-    save_checkpoint(agent, train_iterations, fixed_checkpoint_dir)
+    save_checkpoint(agent, train_iterations, fixed_checkpoint_dir, best_score=best_avg_score)
     buffer.save(fixed_checkpoint_dir)
     print(f"\n🎉 训练全部结束！最终模型保存在: {fixed_checkpoint_dir}")
     writer.close()

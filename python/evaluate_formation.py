@@ -25,10 +25,22 @@ def parse_args():
     parser.add_argument(
         "--model_dir",
         type=str,
-        default="/home/nankai/formation_test/data/MADDPG_Formation_660865_2026-04-26_00-18-35/latest_checkpoint",
+        default="/home/nankai/formation_test/paperdata/full_star_fixed-2_noposobs/best_avg_checkpoint",
         help="要评估的模型文件夹路径（包含 maddpg_checkpoint.pt 的目录）。",
     )
-    parser.add_argument("--eval_episodes", type=int, default=3, help="评估多少局。")
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="/home/nankai/formation_test/paperdata/full_star_fixed-2_noposobs/eval_outputs/self",
+        help="评估结果与轨迹图保存目录。",
+    )
+
+
+
+
+
+    
+    parser.add_argument("--eval_episodes", type=int, default=50, help="评估多少局。")
     parser.add_argument(
         "--map_mode",
         type=str,
@@ -45,7 +57,7 @@ def parse_args():
     parser.add_argument(
         "--render",
         action="store_true",
-        default=True,
+        default=False,
         help="是否实时渲染环境窗口。临时观察行为时打开；批量导图时可关闭。",
     )
     parser.add_argument(
@@ -54,12 +66,7 @@ def parse_args():
         default=True,
         help="是否保存论文用轨迹图。",
     )
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="/home/nankai/formation_test/eval_outputs",
-        help="评估结果与轨迹图保存目录。",
-    )
+    
     parser.add_argument(
         "--save_npz",
         action="store_true",
@@ -119,7 +126,7 @@ def parse_args():
     parser.add_argument("--undirected", dest="directed", action="store_false")
     parser.set_defaults(directed=True)
 
-    parser.add_argument("--comm_mask_zero", action="store_true", default=True)
+    parser.add_argument("--comm_mask_zero", action="store_true", default=False)
 
     parser.add_argument("--gat_encoder_out_size", type=int, default=64)
     parser.add_argument("--ge_num_heads", type=int, default=4)
@@ -148,10 +155,14 @@ def parse_args():
     # =========================================================
     # 延迟设置
     # =========================================================
-    parser.add_argument("--delay_mode", type=str, default="fixed", choices=["none", "fixed", "uniform"], help="通信延迟模式。")
+    parser.add_argument("--delay_mode", type=str, default="uniform", choices=["none", "fixed", "uniform"], help="通信延迟模式。")
     parser.add_argument("--fixed_delay", type=int, default=2, help="固定延迟模式下的延迟步数。")
     parser.add_argument("--min_delay", type=int, default=1, help="随机延迟模式下的最小延迟。")
     parser.add_argument("--max_delay", type=int, default=3, help="随机延迟模式下的最大延迟。")
+
+    parser.add_argument("--no_belief", action="store_true", default=False, help="开启无 Belief 模块的消融实验。")
+    parser.add_argument("--interruption_loss_packet", action="store_true", default=True, help="开启中断、丢包消融实验。")
+
 
     args = parser.parse_args()
 
@@ -336,7 +347,7 @@ def main():
         "custom_map_path": args.custom_map_path,
     }
 
-    env = Formation2DMultiAgentEnv(config)
+    env = Formation2DMultiAgentEnv(config, args)
     agent = MADDPG_Agent(args)
     loaded_episode = load_evaluate_model(agent, args.model_dir)
 
@@ -390,28 +401,50 @@ def main():
             payload["formation_error"] = np.array([formation_error], dtype=np.float32)
             np.savez(npz_path, **payload)
 
-        if args.save_fig:
-            fig_name = f"traj_{args.map_mode}_ep{episode+1:02d}.png"
-            fig_path = os.path.join(args.save_dir, fig_name)
-            title = f"{_map_title(args.map_mode)} | ep {episode+1} | model ep {loaded_episode}"
-            _plot_single_trajectory(env, traj, fig_path, title)
-            print(f"🖼️ 第 {episode+1} 局轨迹图已保存: {fig_path}")
+        # if args.save_fig:
+        #     fig_name = f"traj_{args.map_mode}_ep{episode+1:02d}.png"
+        #     fig_path = os.path.join(args.save_dir, fig_name)
+        #     title = f"{_map_title(args.map_mode)} | ep {episode+1} | model ep {loaded_episode}"
+        #     _plot_single_trajectory(env, traj, fig_path, title)
+        #     print(f"🖼️ 第 {episode+1} 局轨迹图已保存: {fig_path}")
 
     print("\n================ 评估汇总 ================")
     print(f"Map               : {_map_title(args.map_mode)}")
     print(f"Model Episode     : {loaded_episode}")
-    print(f"Avg Reward        : {np.mean(rewards):.3f}")
-    print(f"Success Rate      : {np.mean(successes):.3f}")
-    print(f"Collision Rate    : {np.mean(collisions):.3f}")
-    print(f"Avg Episode Len   : {np.mean(lengths):.3f}")
-    print(f"Avg Formation Err : {np.nanmean(formation_errors):.3f}")
 
-    # if args.save_fig and best_record is not None:
-    #     fig_name = f"traj_{args.map_mode}_best.png"
-    #     fig_path = os.path.join(args.save_dir, fig_name)
-    #     title = f"{_map_title(args.map_mode)} | best rollout | model ep {loaded_episode}"
-    #     _plot_single_trajectory(env, best_record["traj"], fig_path, title)
-    #     print(f"🖼️ 轨迹图已保存: {fig_path}")
+    # 计算均值与标准差
+    rewards_mean, rewards_std = np.mean(rewards), np.std(rewards)
+    lengths_mean, lengths_std = np.mean(lengths), np.std(lengths)
+    succ_mean, succ_std = np.mean(successes), np.std(successes)
+    coll_mean, coll_std = np.mean(collisions), np.std(collisions)
+    ferr_mean = np.nanmean(formation_errors)
+    ferr_std = np.nanstd(formation_errors)
+
+    print(f"Avg Reward        : {rewards_mean:.3f} ± {rewards_std:.3f}")
+    print(f"Avg Episode Len   : {lengths_mean:.3f} ± {lengths_std:.3f}")
+    print(f"Success Rate      : {succ_mean:.3f} ± {succ_std:.3f}")
+    print(f"Collision Rate    : {coll_mean:.3f} ± {coll_std:.3f}")
+    print(f"Avg Formation Err : {ferr_mean:.3f} ± {ferr_std:.3f}")
+
+    # 保存汇总到文本文件
+    summary_path = os.path.join(args.save_dir, "evaluation_summary.txt")
+    with open(summary_path, "w") as f:
+        f.write(f"Map: {_map_title(args.map_mode)}\n")
+        f.write(f"Model Episode: {loaded_episode}\n")
+        f.write(f"Evaluated Episodes: {args.eval_episodes}\n")
+        f.write(f"Avg Reward: {rewards_mean:.3f} ± {rewards_std:.3f}\n")
+        f.write(f"Avg Episode Len: {lengths_mean:.3f} ± {lengths_std:.3f}\n")
+        f.write(f"Success Rate: {succ_mean:.3f} ± {succ_std:.3f}\n")
+        f.write(f"Collision Rate: {coll_mean:.3f} ± {coll_std:.3f}\n")
+        f.write(f"Avg Formation Err: {ferr_mean:.3f} ± {ferr_std:.3f}\n")
+    print(f"📄 统计结果已保存至: {summary_path}")
+
+    if args.save_fig and best_record is not None:
+        fig_name = f"traj_{args.map_mode}_best.png"
+        fig_path = os.path.join(args.save_dir, fig_name)
+        title = f"{_map_title(args.map_mode)} | best rollout | model ep {loaded_episode}"
+        _plot_single_trajectory(env, best_record["traj"], fig_path, title)
+        print(f"🖼️ 轨迹图已保存: {fig_path}")
 
     print("\n评估结束。")
 

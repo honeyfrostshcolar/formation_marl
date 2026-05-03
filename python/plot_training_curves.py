@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 # =========================================================
 # 1. 路径配置
 # =========================================================
-CSV_DIR = Path("/home/nankai/formation_test/paperdata/no-belief_star_fixed-2_latest/tb_csv")          # 改成你的 CSV 文件夹
-OUT_DIR = Path("/home/nankai/formation_test/paperdata/no-belief_star_fixed-2_latest/csv_plot")   # 输出图文件夹
+CSV_DIR = Path("/home/nankai/formation_test/paperdata/full_star_uniform[1,3]_latest/tb_csv")          # 改成你的 CSV 文件夹
+OUT_DIR = Path("/home/nankai/formation_test/paperdata/full_star_uniform[1,3]_latest/csv_plot")   # 输出图文件夹
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 FILES = {
